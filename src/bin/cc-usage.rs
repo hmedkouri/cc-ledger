@@ -178,6 +178,7 @@ impl Totals {
 
         match pricing::cost_of(
             &row.model,
+            row.ts,
             row.input,
             row.output,
             row.cache_1h,
@@ -357,7 +358,7 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
 
     let mut ledger = open()?;
     let now = chrono::Local::now().timestamp();
-    let (mut inserted, mut malformed, mut failed) = (0usize, 0usize, 0usize);
+    let (mut inserted, mut malformed, mut failed, mut dropped) = (0usize, 0usize, 0usize, 0usize);
 
     for path in &paths {
         let key = path.to_string_lossy().to_string();
@@ -365,6 +366,7 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
         match transcript::scan(path, cursor) {
             Ok(scan) => {
                 malformed += scan.malformed;
+                dropped += scan.dropped;
                 // Records and cursor in one transaction. An interrupted
                 // backfill must never leave the cursor ahead of the committed
                 // data, which would skip those requests permanently.
@@ -389,6 +391,12 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
     );
     if malformed > 0 {
         println!("Skipped {malformed} unparseable lines.");
+    }
+    if dropped > 0 {
+        println!(
+            "Warning: {dropped} billed requests could not be recorded (missing id, \
+             model or timestamp) and are absent from every total."
+        );
     }
     if failed > 0 {
         println!("{failed} transcripts could not be read.");

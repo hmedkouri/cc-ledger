@@ -20,6 +20,11 @@
 //! A subscription's cost is its fee; this answers "what would this usage have
 //! cost on the API", which is the number that says whether the subscription is
 //! worth it.
+//!
+//! What it does *not* model, because the ledger has no traffic exhibiting any
+//! of them: fast mode (`speed: "fast"` doubles Opus 5 rates), US-pinned
+//! inference (`inference_geo: "us"` adds 10% to every class), and server tool
+//! charges such as web search at $10 per 1,000 requests.
 
 /// Per-million-token rates, USD.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,12 +58,29 @@ impl Cost {
     }
 }
 
-/// Rates for a model id as recorded in a transcript.
+/// Rates for a model as they stood at `ts` (UTC seconds).
 ///
-/// Returns `None` for anything not in the table, so callers can report
-/// unpriced tokens rather than silently valuing them at zero — a new model id
-/// appearing after a Claude Code update must not quietly shrink the total.
-pub fn rates_for(model: &str) -> Option<Rates> {
+/// Prices are a function of `(model, date)`, not of model alone: Anthropic has
+/// both cut a rate mid-life (Fable 5.1's cache reads dropped to 0.025x base on
+/// 2026-09-01) and cancelled a scheduled rise (Sonnet 5's introductory $2/$10
+/// was made permanent instead of stepping to $3/$15). A table without a date
+/// axis silently prices last month's requests at this month's rates.
+///
+/// Every arm below currently returns one rate for all time, because no change
+/// falls inside any window this ledger holds. The parameter exists so that when
+/// one does, the fix is an added arm here rather than a refactor of every call
+/// site under time pressure. The failure mode of "add the axis the day a rate
+/// moves" is that nobody notices the day; the failure mode of carrying an
+/// unused parameter is nothing.
+///
+/// Returns `None` for anything not in the table, so callers report unpriced
+/// tokens rather than valuing them at zero — a model id introduced by a future
+/// Claude Code release must not quietly shrink a total.
+pub fn rates_for(model: &str, ts: i64) -> Option<Rates> {
+    // Deliberately unused for now: no rate in this table has moved within a
+    // window the ledger can represent. Branch on it here when one does.
+    let _ = ts;
+
     // Claude Code records pinned ids; a few carry a date suffix.
     let id = model.strip_suffix("-20251001").unwrap_or(model);
 
@@ -85,19 +107,20 @@ pub fn rates_for(model: &str) -> Option<Rates> {
     })
 }
 
-/// Price one set of token counts.
+/// Price one request's token counts at the rates in force when it was made.
 ///
-/// `cache_1h` and `cache_5m` are the ephemeral split; they are priced at
-/// different multipliers and must not be summed before pricing.
+/// `cache_1h` and `cache_5m` are the ephemeral split; they carry different
+/// multipliers and must not be summed before pricing.
 pub fn cost_of(
     model: &str,
+    ts: i64,
     input: i64,
     output: i64,
     cache_1h: i64,
     cache_5m: i64,
     cache_read: i64,
 ) -> Option<Cost> {
-    let r = rates_for(model)?;
+    let r = rates_for(model, ts)?;
     let per_m = |tokens: i64, rate: f64| (tokens as f64 / 1_000_000.0) * rate;
 
     Some(Cost {
@@ -123,13 +146,16 @@ pub fn format_usd(amount: f64) -> String {
 mod tests {
     use super::*;
 
+    /// 2026-09-05, inside the window this ledger actually holds.
+    const T: i64 = 1_788_616_592;
+
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
     }
 
     #[test]
     fn opus_rates_match_the_published_table() {
-        let r = rates_for("claude-opus-5").unwrap();
+        let r = rates_for("claude-opus-5", T).unwrap();
         approx(r.input, 5.0);
         approx(r.cache_write_5m, 6.25);
         approx(r.cache_write_1h, 10.0);
@@ -140,14 +166,14 @@ mod tests {
     /// The published exception: Fable 5.1 cache reads are 0.025x base, not 0.1x.
     #[test]
     fn fable_5_1_has_the_discounted_cache_read_rate() {
-        approx(rates_for("claude-fable-5-1").unwrap().cache_read, 0.25);
-        approx(rates_for("claude-fable-5").unwrap().cache_read, 1.00);
+        approx(rates_for("claude-fable-5-1", T).unwrap().cache_read, 0.25);
+        approx(rates_for("claude-fable-5", T).unwrap().cache_read, 1.00);
     }
 
     #[test]
     fn cache_write_multipliers_are_derived_not_guessed() {
         for model in ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] {
-            let r = rates_for(model).unwrap();
+            let r = rates_for(model, T).unwrap();
             approx(r.cache_write_5m, r.input * 1.25);
             approx(r.cache_write_1h, r.input * 2.0);
         }
@@ -156,8 +182,8 @@ mod tests {
     #[test]
     fn dated_model_ids_resolve() {
         assert_eq!(
-            rates_for("claude-haiku-4-5-20251001"),
-            rates_for("claude-haiku-4-5")
+            rates_for("claude-haiku-4-5-20251001", T),
+            rates_for("claude-haiku-4-5", T)
         );
     }
 
@@ -165,15 +191,15 @@ mod tests {
     /// total is worse than reporting that some tokens could not be priced.
     #[test]
     fn unknown_models_are_not_priced() {
-        assert!(rates_for("claude-something-6").is_none());
-        assert!(cost_of("claude-something-6", 1, 1, 1, 1, 1).is_none());
+        assert!(rates_for("claude-something-6", T).is_none());
+        assert!(cost_of("claude-something-6", T, 1, 1, 1, 1, 1).is_none());
     }
 
     /// The worked example from the pricing docs: 10k uncached input, 40k cache
     /// reads, 15k output on Opus 5 = $0.05 + $0.02 + $0.375.
     #[test]
     fn matches_the_published_worked_example() {
-        let c = cost_of("claude-opus-5", 10_000, 15_000, 0, 0, 40_000).unwrap();
+        let c = cost_of("claude-opus-5", T, 10_000, 15_000, 0, 0, 40_000).unwrap();
         approx(c.input, 0.05);
         approx(c.cache_read, 0.02);
         approx(c.output, 0.375);
@@ -184,8 +210,8 @@ mod tests {
     /// before pricing would understate a 1h-only workload by 37.5%.
     #[test]
     fn ephemeral_split_is_priced_separately() {
-        let all_1h = cost_of("claude-opus-5", 0, 0, 1_000_000, 0, 0).unwrap();
-        let all_5m = cost_of("claude-opus-5", 0, 0, 0, 1_000_000, 0).unwrap();
+        let all_1h = cost_of("claude-opus-5", T, 0, 0, 1_000_000, 0, 0).unwrap();
+        let all_5m = cost_of("claude-opus-5", T, 0, 0, 0, 1_000_000, 0).unwrap();
         approx(all_1h.cache_write, 10.0);
         approx(all_5m.cache_write, 6.25);
         assert!(all_1h.cache_write > all_5m.cache_write);
@@ -194,10 +220,26 @@ mod tests {
     #[test]
     fn costs_accumulate() {
         let mut total = Cost::default();
-        total.add(cost_of("claude-opus-5", 0, 1_000_000, 0, 0, 0).unwrap());
-        total.add(cost_of("claude-opus-5", 0, 1_000_000, 0, 0, 0).unwrap());
+        total.add(cost_of("claude-opus-5", T, 0, 1_000_000, 0, 0, 0).unwrap());
+        total.add(cost_of("claude-opus-5", T, 0, 1_000_000, 0, 0, 0).unwrap());
         approx(total.output, 50.0);
         approx(total.total(), 50.0);
+    }
+
+    /// The date axis is wired through even though no arm branches on it yet:
+    /// a request from any point in the ledger's range prices identically today,
+    /// and that equality is what a future rate change is expected to break.
+    #[test]
+    fn rates_are_currently_stable_across_the_ledgers_whole_range() {
+        let earliest = 1_788_000_000; // before any data this ledger holds
+        let latest = 1_800_000_000; // comfortably after
+        for model in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
+            assert_eq!(
+                rates_for(model, earliest),
+                rates_for(model, latest),
+                "{model} has no dated arm yet; add one when a rate moves"
+            );
+        }
     }
 
     #[test]

@@ -62,6 +62,14 @@ pub struct UsageRecord {
     pub thinking: i64,
     pub cache_1h: i64,
     pub cache_5m: i64,
+    /// `"standard"` or `"fast"`. Fast mode doubles Opus rates, so a ledger that
+    /// drops this cannot price a fast-mode session. Captured even though no
+    /// observed traffic uses it: transcripts are pruned, and a field not
+    /// recorded before that is unrecoverable afterwards.
+    pub speed: Option<String>,
+    /// `"us"` pins inference to the United States and adds 10% to every token
+    /// class. Captured for the same reason as `speed`.
+    pub inference_geo: Option<String>,
     pub source: Source,
     pub transcript_path: String,
 }
@@ -86,6 +94,12 @@ pub struct Scan {
     pub cursor: Cursor,
     /// Lines that failed to parse. Skipped, counted, never fatal.
     pub malformed: usize,
+    /// Lines that *were* billed requests — assistant records carrying a usage
+    /// object — but could not be turned into a record, because `message.id`,
+    /// `message.model` or `timestamp` was missing or unparseable. Each one is a
+    /// billed request vanishing from the ledger, so it is counted rather than
+    /// silently discarded.
+    pub dropped: usize,
     /// True when the file shrank or its identity changed and we restarted.
     pub restarted: bool,
     /// False when the batch stopped at its line cap rather than at end of file,
@@ -125,6 +139,8 @@ struct RawUsage {
     cache_read_input_tokens: Option<i64>,
     output_tokens_details: Option<RawOutputDetails>,
     cache_creation: Option<RawCacheCreation>,
+    speed: Option<String>,
+    inference_geo: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -145,17 +161,30 @@ fn parse_ts(raw: Option<&str>) -> Option<i64> {
 }
 
 impl RawLine {
-    fn into_record(self, transcript_path: &str) -> Option<UsageRecord> {
+    /// `dropped` counts billed requests that could not be recorded, so they
+    /// surface as a number instead of disappearing.
+    fn into_record(self, transcript_path: &str, dropped: &mut usize) -> Option<UsageRecord> {
         if self.kind.as_deref() != Some("assistant") {
             return None;
         }
         let message = self.message?;
+        // No usage object means nothing was billed on this line.
         let usage = message.usage?;
-        let dedupe_key = message.id?;
-        let model = message.model?;
 
-        // `<synthetic>` records are local placeholders with all-zero usage,
-        // not API calls. Skipping them keeps the model breakdown honest.
+        // Past this point the line *is* a billed request, so failing to record
+        // it loses money from the ledger silently. Count it.
+        let (Some(dedupe_key), Some(model), Some(ts)) = (
+            message.id,
+            message.model,
+            parse_ts(self.timestamp.as_deref()),
+        ) else {
+            *dropped += 1;
+            return None;
+        };
+
+        // `<synthetic>` records are local placeholders with all-zero usage, not
+        // API calls. Not a drop: nothing was billed. Skipping them keeps the
+        // model breakdown honest.
         if model.starts_with('<') {
             return None;
         }
@@ -168,7 +197,7 @@ impl RawLine {
             session_id: self.session_id,
             project_dir: self.cwd,
             model,
-            ts: parse_ts(self.timestamp.as_deref())?,
+            ts,
             input: usage.input_tokens.unwrap_or(0),
             output: usage.output_tokens.unwrap_or(0),
             cache_create: usage.cache_creation_input_tokens.unwrap_or(0),
@@ -182,6 +211,8 @@ impl RawLine {
                 .as_ref()
                 .and_then(|c| c.ephemeral_5m_input_tokens)
                 .unwrap_or(0),
+            speed: usage.speed,
+            inference_geo: usage.inference_geo,
             source: Source::from_sidechain(self.is_sidechain.unwrap_or(false)),
             transcript_path: transcript_path.to_string(),
         })
@@ -233,6 +264,7 @@ pub fn scan_batch(
     let path_str = path.to_string_lossy();
     let mut records = Vec::new();
     let mut malformed = 0usize;
+    let mut dropped = 0usize;
     let mut offset = start;
     let mut buf = Vec::new();
     let mut lines = 0usize;
@@ -264,7 +296,7 @@ pub fn scan_batch(
         }
         match serde_json::from_slice::<RawLine>(line) {
             Ok(raw) => {
-                if let Some(record) = raw.into_record(&path_str) {
+                if let Some(record) = raw.into_record(&path_str, &mut dropped) {
                     records.push(record);
                 }
             }
@@ -279,6 +311,7 @@ pub fn scan_batch(
             file_id,
         },
         malformed,
+        dropped,
         restarted,
         exhausted,
     })
@@ -380,6 +413,44 @@ mod tests {
                 .any(|r| r.dedupe_key == "msg_FIXTURESYNTH"),
             "<synthetic> records are local placeholders, not billed requests"
         );
+    }
+
+    /// A billed request that cannot be recorded must surface as a number.
+    /// Previously `into_record` returned `None` for a missing `message.id`,
+    /// `model` or timestamp exactly as it does for a user line, so a billed
+    /// request could vanish with nothing counting it.
+    #[test]
+    fn billed_requests_that_cannot_be_recorded_are_counted() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-dropped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-09-05T15:00:00.000Z","message":{"id":"msg_OK","model":"claude-opus-5","usage":{"input_tokens":1,"output_tokens":2}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-09-05T15:00:01.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":9,"output_tokens":9}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"not-a-date","message":{"id":"msg_B","model":"claude-opus-5","usage":{"input_tokens":9,"output_tokens":9}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-09-05T15:00:02.000Z","message":{"id":"msg_C","model":"claude-opus-5"}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-09-05T15:00:03.000Z","message":{"id":"msg_D","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let scan = scan(&path, None).unwrap();
+
+        assert_eq!(scan.records.len(), 1, "only the usable record");
+        assert_eq!(scan.malformed, 0, "every line is valid JSON");
+        assert_eq!(
+            scan.dropped, 2,
+            "the id-less and the bad-timestamp lines were billed but unrecordable"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

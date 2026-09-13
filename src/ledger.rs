@@ -82,11 +82,39 @@ pub struct SessionRow {
 /// transaction the caller opened.
 fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Result<usize> {
     let mut inserted = 0usize;
+    // Merge on conflict rather than ignore. Today every content-block line of
+    // a response repeats a byte-identical usage object, so first-line-wins and
+    // max() agree — but nothing guarantees Claude Code keeps buffering the
+    // final usage onto every line. If a release ever wrote the first line with
+    // `message_start` usage (output ~1) and the rest with the final figures,
+    // INSERT OR IGNORE would keep the first and under-count silently forever.
+    // Usage is monotonic within a response, so max() is always correct.
+    //
+    // The WHERE clause keeps the return value meaning "rows genuinely new":
+    // an identical repeat updates nothing and reports 0.
     let mut stmt = tx.prepare_cached(
-        "INSERT OR IGNORE INTO requests
+        "INSERT INTO requests
          (dedupe_key, session_id, project_dir, model, ts, input, output,
-          cache_create, cache_read, thinking, cache_1h, cache_5m, source, transcript_path)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+          cache_create, cache_read, thinking, cache_1h, cache_5m, source,
+          transcript_path, speed, inference_geo)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         ON CONFLICT(dedupe_key) DO UPDATE SET
+           input        = max(requests.input,        excluded.input),
+           output       = max(requests.output,       excluded.output),
+           cache_create = max(requests.cache_create, excluded.cache_create),
+           cache_read   = max(requests.cache_read,   excluded.cache_read),
+           thinking     = max(requests.thinking,     excluded.thinking),
+           cache_1h     = max(requests.cache_1h,     excluded.cache_1h),
+           cache_5m     = max(requests.cache_5m,     excluded.cache_5m),
+           speed          = coalesce(requests.speed,         excluded.speed),
+           inference_geo  = coalesce(requests.inference_geo, excluded.inference_geo)
+         WHERE excluded.input        > requests.input
+            OR excluded.output       > requests.output
+            OR excluded.cache_create > requests.cache_create
+            OR excluded.cache_read   > requests.cache_read
+            OR excluded.thinking     > requests.thinking
+            OR excluded.cache_1h     > requests.cache_1h
+            OR excluded.cache_5m     > requests.cache_5m",
     )?;
     let mut session = tx.prepare_cached(
         "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen)
@@ -113,6 +141,8 @@ fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Re
             r.cache_5m,
             r.source.as_str(),
             r.transcript_path,
+            r.speed,
+            r.inference_geo,
         ])?;
         if let Some(sid) = &r.session_id {
             session.execute(rusqlite::params![sid, r.project_dir, r.ts])?;
@@ -208,7 +238,11 @@ impl Ledger {
                 cache_1h        INTEGER NOT NULL DEFAULT 0,
                 cache_5m        INTEGER NOT NULL DEFAULT 0,
                 source          TEXT NOT NULL DEFAULT 'main',
-                transcript_path TEXT
+                transcript_path TEXT,
+                -- Added after the first release. Databases created before this
+                -- are widened by the ALTER pass below, not by this statement.
+                speed           TEXT,
+                inference_geo   TEXT
             );
             CREATE INDEX IF NOT EXISTS requests_ts         ON requests(ts);
             CREATE INDEX IF NOT EXISTS requests_model_ts   ON requests(model, ts);
@@ -242,7 +276,36 @@ impl Ledger {
             );
             "#,
         )?;
+
+        // `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        // exists, so columns added after a release have to be applied
+        // explicitly or every existing ledger fails at insert time with "no
+        // such column". Checking first makes this idempotent and keeps startup
+        // free of expected-and-ignored errors.
+        for (column, ddl) in [
+            ("speed", "ALTER TABLE requests ADD COLUMN speed TEXT"),
+            (
+                "inference_geo",
+                "ALTER TABLE requests ADD COLUMN inference_geo TEXT",
+            ),
+        ] {
+            if !self.has_column("requests", column)? {
+                self.conn.execute(ddl, [])?;
+            }
+        }
         Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        // PRAGMA arguments cannot be bound; `table` is always a literal here.
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(1)? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Returns how many rows were genuinely new.
@@ -512,6 +575,8 @@ mod tests {
             thinking: output / 2,
             cache_1h: 10,
             cache_5m: 0,
+            speed: Some("standard".into()),
+            inference_geo: Some("not_available".into()),
             source: Source::Main,
             transcript_path: "/t.jsonl".into(),
         }
@@ -529,6 +594,54 @@ mod tests {
             "second pass inserts none"
         );
         assert_eq!(l.request_count().unwrap(), 1);
+    }
+
+    /// Content-block lines repeat a byte-identical usage object today, so
+    /// first-line-wins and max() agree. Nothing guarantees Claude Code keeps
+    /// buffering the final usage onto every line, though: were a release to
+    /// write the first line with `message_start` usage (output ~1) and the rest
+    /// with the final figures, `INSERT OR IGNORE` would keep the first and
+    /// under-count silently. Usage is monotonic within a response, so merging
+    /// with max() is always correct and cannot regress.
+    #[test]
+    fn a_later_line_with_higher_usage_wins() {
+        let mut l = Ledger::open_in_memory().unwrap();
+
+        let partial = record("msg_A", 1_000, 1);
+        let complete = record("msg_A", 1_000, 589);
+
+        l.ingest(std::slice::from_ref(&partial)).unwrap();
+        assert_eq!(
+            l.ingest(std::slice::from_ref(&complete)).unwrap(),
+            1,
+            "a higher figure is a genuine update"
+        );
+
+        let rows = l.rows(None, None).unwrap();
+        assert_eq!(rows.len(), 1, "still one request, not two");
+        assert_eq!(rows[0].output, 589, "kept the final usage, not the first");
+
+        // Replaying the low value must not drag it back down, and must not be
+        // reported as new work.
+        assert_eq!(l.ingest(std::slice::from_ref(&partial)).unwrap(), 0);
+        assert_eq!(l.rows(None, None).unwrap()[0].output, 589);
+    }
+
+    #[test]
+    fn speed_and_inference_geo_survive_a_round_trip() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        l.ingest(&[record("msg_A", 1_000, 10)]).unwrap();
+
+        let stored: (Option<String>, Option<String>) = l
+            .conn
+            .query_row(
+                "SELECT speed, inference_geo FROM requests WHERE dedupe_key = 'msg_A'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0.as_deref(), Some("standard"));
+        assert_eq!(stored.1.as_deref(), Some("not_available"));
     }
 
     /// The real shape of the bug this guards: one response, three content-block
