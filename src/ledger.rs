@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use crate::payload::RateLimit;
-use crate::transcript::{Cursor, UsageRecord};
+use crate::transcript::{CostState, Cursor, Scan, UsageRecord};
 
 /// How long a writer waits for another session's lock before giving up.
 const WRITE_BUSY_TIMEOUT_MS: u64 = 250;
@@ -64,6 +64,22 @@ pub struct Row {
 impl Row {
     pub fn total(&self) -> i64 {
         self.input + self.output + self.cache_create + self.cache_read
+    }
+}
+
+/// Ledger totals measured against Claude Code's own, over the sessions where
+/// both exist.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Coverage {
+    pub sessions: i64,
+    pub claude_tokens: i64,
+    pub ledger_tokens: i64,
+}
+
+impl Coverage {
+    pub fn percent(&self) -> Option<f64> {
+        (self.claude_tokens > 0)
+            .then(|| self.ledger_tokens as f64 / self.claude_tokens as f64 * 100.0)
     }
 }
 
@@ -149,6 +165,46 @@ fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Re
         }
     }
     Ok(inserted)
+}
+
+/// Snapshots are cumulative, so the latest one seen wins outright.
+fn insert_cost_states(
+    tx: &rusqlite::Transaction<'_>,
+    states: &[CostState],
+    now: i64,
+) -> Result<()> {
+    if states.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO cost_state
+         (session_id, cost_usd, input, output, thinking, cache_read,
+          cache_create, models, captured_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(session_id) DO UPDATE SET
+           cost_usd     = excluded.cost_usd,
+           input        = excluded.input,
+           output       = excluded.output,
+           thinking     = excluded.thinking,
+           cache_read   = excluded.cache_read,
+           cache_create = excluded.cache_create,
+           models       = excluded.models,
+           captured_at  = excluded.captured_at",
+    )?;
+    for s in states {
+        stmt.execute(rusqlite::params![
+            s.session_id,
+            s.cost_usd,
+            s.input,
+            s.output,
+            s.thinking,
+            s.cache_read,
+            s.cache_create,
+            s.models,
+            now,
+        ])?;
+    }
+    Ok(())
 }
 
 /// `CC_LEDGER_DB`, else `$XDG_DATA_HOME/cc-ledger/ledger.db`, else
@@ -256,6 +312,22 @@ impl Ledger {
                 last_seen       INTEGER NOT NULL
             );
 
+            -- Claude Code's own cumulative accounting, one row per session,
+            -- superseded by each later snapshot. The only record of billed
+            -- requests that never produced an assistant line (docs/formats.md
+            -- 2.8), and pruned along with the transcripts that carry it.
+            CREATE TABLE IF NOT EXISTS cost_state (
+                session_id   TEXT PRIMARY KEY,
+                cost_usd     REAL    NOT NULL DEFAULT 0,
+                input        INTEGER NOT NULL DEFAULT 0,
+                output       INTEGER NOT NULL DEFAULT 0,
+                thinking     INTEGER NOT NULL DEFAULT 0,
+                cache_read   INTEGER NOT NULL DEFAULT 0,
+                cache_create INTEGER NOT NULL DEFAULT 0,
+                models       TEXT,
+                captured_at  INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id  TEXT PRIMARY KEY,
                 project_dir TEXT,
@@ -330,15 +402,15 @@ impl Ledger {
     /// Called with an empty `records` when a batch held only blank or
     /// unparseable lines: the cursor must still advance, or the reader would
     /// re-read them forever.
-    pub fn ingest_batch(
-        &mut self,
-        records: &[UsageRecord],
-        transcript_path: &str,
-        cursor: Cursor,
-        now: i64,
-    ) -> Result<usize> {
+    /// Takes the whole [`Scan`] rather than its parts: everything the batch
+    /// produced — requests, Claude Code's own session totals, and the cursor —
+    /// belongs in one transaction, and this stops the signature churning each
+    /// time a scan learns to extract something new.
+    pub fn ingest_batch(&mut self, scan: &Scan, transcript_path: &str, now: i64) -> Result<usize> {
+        let cursor = scan.cursor;
         let tx = self.conn.transaction()?;
-        let inserted = insert_records(&tx, records)?;
+        let inserted = insert_records(&tx, &scan.records)?;
+        insert_cost_states(&tx, &scan.cost_states, now)?;
         tx.execute(
             "INSERT INTO cursors (transcript_path, byte_offset, file_id, last_seen)
              VALUES (?1, ?2, ?3, ?4)
@@ -508,6 +580,33 @@ impl Ledger {
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// How much of Claude Code's own accounting the per-request rows account
+    /// for, over the sessions where both are known.
+    ///
+    /// Expected to be slightly under 100%: the transcript omits requests that
+    /// never produced an assistant record. A number far below, or above, means
+    /// something is wrong rather than merely incomplete.
+    pub fn coverage(&self) -> Result<Coverage> {
+        let row = self.conn.query_row(
+            "SELECT
+               (SELECT count(*) FROM cost_state),
+               (SELECT coalesce(sum(input + output + cache_create + cache_read), 0)
+                  FROM cost_state),
+               (SELECT coalesce(sum(r.input + r.output + r.cache_create + r.cache_read), 0)
+                  FROM requests r
+                 WHERE r.session_id IN (SELECT session_id FROM cost_state))",
+            [],
+            |r| {
+                Ok(Coverage {
+                    sessions: r.get(0)?,
+                    claude_tokens: r.get(1)?,
+                    ledger_tokens: r.get(2)?,
+                })
+            },
+        )?;
+        Ok(row)
     }
 
     pub fn request_count(&self) -> Result<i64> {

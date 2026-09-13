@@ -190,8 +190,8 @@ fn ingest_one(
         // Nothing new: skip the write entirely rather than touch the cursor
         // row on every render and contend for the lock for no reason.
         let advanced = cursor.map(|c| c.byte_offset) != Some(scan.cursor.byte_offset);
-        if !scan.records.is_empty() || advanced {
-            ledger.ingest_batch(&scan.records, &key, scan.cursor, now)?;
+        if !scan.records.is_empty() || !scan.cost_states.is_empty() || advanced {
+            ledger.ingest_batch(&scan, &key, now)?;
         }
 
         if scan.exhausted || std::time::Instant::now() >= deadline {

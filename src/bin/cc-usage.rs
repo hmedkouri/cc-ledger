@@ -263,7 +263,26 @@ fn summary(range: Range, cost: bool) -> Result<()> {
         print_cost_breakdown(&totals);
     }
 
+    print_coverage(&open()?.coverage().unwrap_or_default());
+
     Ok(())
+}
+
+/// States the error bar rather than leaving the reader to trust a figure known
+/// to run low. Claude Code bills requests that never reach the transcript, so
+/// slightly under 100% is the expected, healthy result.
+fn print_coverage(coverage: &cc_ledger::ledger::Coverage) {
+    let Some(percent) = coverage.percent() else {
+        return;
+    };
+    println!();
+    println!(
+        "Coverage: {percent:.1}% of the tokens Claude Code itself counted across \
+         {} session(s)",
+        coverage.sessions
+    );
+    println!("with its own accounting. The shortfall is requests that never produced a");
+    println!("transcript record — retries, aborted turns — and is expected.");
 }
 
 fn breakdown(range: Range, by: Option<GroupBy>, period: Period, cost: bool) -> Result<()> {
@@ -370,7 +389,7 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
                 // Records and cursor in one transaction. An interrupted
                 // backfill must never leave the cursor ahead of the committed
                 // data, which would skip those requests permanently.
-                match ledger.ingest_batch(&scan.records, &key, scan.cursor, now) {
+                match ledger.ingest_batch(&scan, &key, now) {
                     Ok(n) => inserted += n,
                     Err(e) => {
                         failed += 1;

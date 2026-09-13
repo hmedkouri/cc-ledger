@@ -80,6 +80,40 @@ impl UsageRecord {
     }
 }
 
+/// Claude Code's own cumulative accounting for a session, from a `cost-state`
+/// record.
+///
+/// This is the only trace of billed usage the per-request rows can never hold.
+/// Requests that produced no `assistant` record — retries, aborted turns,
+/// auxiliary generations — are billed and counted here but absent from the
+/// transcript entirely (`docs/formats.md` §2.8), which is why ledger totals run
+/// a few percent under. Capturing it turns "a number known to run low" into a
+/// number with a stated error bar.
+///
+/// Snapshots are cumulative and re-emitted, so a later one supersedes an
+/// earlier one. They are pruned with everything else, hence capturing now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostState {
+    pub session_id: String,
+    pub cost_usd: f64,
+    pub input: i64,
+    pub output: i64,
+    pub thinking: i64,
+    pub cache_read: i64,
+    pub cache_create: i64,
+    /// Model ids exactly as Claude Code names them, comma-separated and sorted
+    /// — including the `[1m]` suffix that `message.model` drops.
+    pub models: String,
+}
+
+impl CostState {
+    /// Comparable with a ledger total: `thinking` is a subset of `output` and
+    /// is excluded, exactly as it is for a `UsageRecord`.
+    pub fn total(&self) -> i64 {
+        self.input + self.output + self.cache_create + self.cache_read
+    }
+}
+
 /// Position in a transcript, so the next pass resumes instead of re-reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -91,6 +125,8 @@ pub struct Cursor {
 #[derive(Debug)]
 pub struct Scan {
     pub records: Vec<UsageRecord>,
+    /// Claude Code's own session totals seen in this batch, if any.
+    pub cost_states: Vec<CostState>,
     pub cursor: Cursor,
     /// Lines that failed to parse. Skipped, counted, never fatal.
     pub malformed: usize,
@@ -122,6 +158,27 @@ struct RawLine {
     #[serde(rename = "isSidechain")]
     is_sidechain: Option<bool>,
     message: Option<RawMessage>,
+    // Present only on `cost-state` records.
+    #[serde(rename = "totalCostUSD")]
+    total_cost_usd: Option<f64>,
+    #[serde(rename = "modelUsage")]
+    model_usage: Option<std::collections::BTreeMap<String, RawModelUsage>>,
+}
+
+/// Per-model totals inside a `cost-state` record. Note the camelCase names:
+/// this object is shaped differently from `message.usage`.
+#[derive(Deserialize)]
+struct RawModelUsage {
+    #[serde(rename = "inputTokens")]
+    input_tokens: Option<i64>,
+    #[serde(rename = "outputTokens")]
+    output_tokens: Option<i64>,
+    #[serde(rename = "thinkingTokens")]
+    thinking_tokens: Option<i64>,
+    #[serde(rename = "cacheReadInputTokens")]
+    cache_read_input_tokens: Option<i64>,
+    #[serde(rename = "cacheCreationInputTokens")]
+    cache_creation_input_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +218,33 @@ fn parse_ts(raw: Option<&str>) -> Option<i64> {
 }
 
 impl RawLine {
+    /// Claude Code's cumulative totals for the session, summed across every
+    /// model it lists. A `BTreeMap` keeps the model names sorted, so the stored
+    /// string is stable between snapshots.
+    fn into_cost_state(self) -> Option<CostState> {
+        let session_id = self.session_id?;
+        let usage = self.model_usage?;
+
+        let mut state = CostState {
+            session_id,
+            cost_usd: self.total_cost_usd.unwrap_or(0.0),
+            input: 0,
+            output: 0,
+            thinking: 0,
+            cache_read: 0,
+            cache_create: 0,
+            models: usage.keys().cloned().collect::<Vec<_>>().join(","),
+        };
+        for m in usage.values() {
+            state.input += m.input_tokens.unwrap_or(0);
+            state.output += m.output_tokens.unwrap_or(0);
+            state.thinking += m.thinking_tokens.unwrap_or(0);
+            state.cache_read += m.cache_read_input_tokens.unwrap_or(0);
+            state.cache_create += m.cache_creation_input_tokens.unwrap_or(0);
+        }
+        Some(state)
+    }
+
     /// `dropped` counts billed requests that could not be recorded, so they
     /// surface as a number instead of disappearing.
     fn into_record(self, transcript_path: &str, dropped: &mut usize) -> Option<UsageRecord> {
@@ -263,6 +347,7 @@ pub fn scan_batch(
 
     let path_str = path.to_string_lossy();
     let mut records = Vec::new();
+    let mut cost_states = Vec::new();
     let mut malformed = 0usize;
     let mut dropped = 0usize;
     let mut offset = start;
@@ -296,7 +381,11 @@ pub fn scan_batch(
         }
         match serde_json::from_slice::<RawLine>(line) {
             Ok(raw) => {
-                if let Some(record) = raw.into_record(&path_str, &mut dropped) {
+                if raw.kind.as_deref() == Some("cost-state") {
+                    if let Some(state) = raw.into_cost_state() {
+                        cost_states.push(state);
+                    }
+                } else if let Some(record) = raw.into_record(&path_str, &mut dropped) {
                     records.push(record);
                 }
             }
@@ -306,6 +395,7 @@ pub fn scan_batch(
 
     Ok(Scan {
         records,
+        cost_states,
         cursor: Cursor {
             byte_offset: offset,
             file_id,

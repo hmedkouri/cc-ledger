@@ -153,7 +153,7 @@ fn one_committed_batch_stays_within_budget() {
     let start = Instant::now();
     let scan = transcript::scan_batch(&path, None, Some(BATCH_LINES)).expect("scan succeeds");
     let inserted = ledger
-        .ingest_batch(&scan.records, &key, scan.cursor, 0)
+        .ingest_batch(&scan, &key, 0)
         .expect("ingest succeeds");
     let elapsed = start.elapsed();
 
