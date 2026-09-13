@@ -5,7 +5,7 @@ LINK_DIR ?= $(HOME)/.local/bin
 SETTINGS ?= $(HOME)/.claude/settings.json
 UNAME := $(shell uname -s)
 
-.PHONY: all build test lint install install-bins statusline-diff statusline-apply backfill clean
+.PHONY: all build test lint install install-bins statusline-diff statusline-apply uninstall backfill clean
 
 all: lint test
 
@@ -68,6 +68,34 @@ statusline-apply:
 ## One-off: read every transcript currently on disk into the ledger.
 backfill: install-bins
 	@"$(BIN_DIR)/cc-usage" backfill
+
+## Reverse `install`. Restores only the statusLine key from the most recent
+## backup, so anything else changed in settings.json since install survives.
+## The ledger database is never touched.
+uninstall:
+	@rm -f "$(BIN_DIR)/statusline" "$(BIN_DIR)/cc-usage"
+	@echo "Removed statusline and cc-usage from $(BIN_DIR)"
+	@if [ -L "$(LINK_DIR)/cc-usage" ] || [ -f "$(LINK_DIR)/cc-usage" ]; then \
+		rm -f "$(LINK_DIR)/cc-usage"; echo "Removed $(LINK_DIR)/cc-usage"; \
+	fi
+	@latest=$$(ls -1t "$(SETTINGS)".bak.* 2>/dev/null | head -1); \
+	if [ ! -f "$(SETTINGS)" ]; then \
+		echo "No $(SETTINGS); nothing to restore"; \
+	elif [ -z "$$latest" ]; then \
+		echo "No settings.json backup found - leaving it alone."; \
+		echo "  Remove the statusLine key by hand if you set it."; \
+	elif ! command -v jq >/dev/null; then \
+		echo "jq is required to edit settings.json safely; leaving it alone"; \
+	else \
+		cp "$(SETTINGS)" "$(SETTINGS).bak.$$(date +%Y%m%d%H%M%S)"; \
+		jq --argjson old "$$(jq -c '.statusLine // null' "$$latest")" \
+			'if $$old == null then del(.statusLine) else .statusLine = $$old end' \
+			"$(SETTINGS)" > "$(SETTINGS).tmp"; \
+		jq -e . "$(SETTINGS).tmp" >/dev/null || { echo "refusing to write invalid JSON"; rm -f "$(SETTINGS).tmp"; exit 1; }; \
+		mv "$(SETTINGS).tmp" "$(SETTINGS)"; \
+		echo "Restored statusLine from $$latest (only that key changed)"; \
+	fi
+	@echo "The ledger database was left in place; delete it yourself if you want it gone."
 
 clean:
 	cargo clean
