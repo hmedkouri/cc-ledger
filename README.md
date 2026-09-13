@@ -31,8 +31,37 @@ activity cache showed usage stretching back nine months.
 }
 ```
 
-Then build and install. Needs a Rust toolchain (1.87+); SQLite is bundled, so
-there is nothing else to install.
+### Prebuilt binaries
+
+No Rust toolchain needed. Every release carries static Linux builds and both
+macOS architectures, each with a SHA256 alongside it.
+
+```sh
+# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl,
+# aarch64-apple-darwin or x86_64-apple-darwin
+TARGET=x86_64-unknown-linux-musl
+VERSION=v0.1.1
+BASE=https://github.com/hmedkouri/cc-ledger/releases/download/$VERSION
+curl -LO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz
+curl -LO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz.sha256
+sha256sum -c cc-ledger-$VERSION-$TARGET.tar.gz.sha256   # shasum -a 256 -c on macOS
+tar xzf cc-ledger-$VERSION-$TARGET.tar.gz
+mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
+```
+
+The Linux archives are statically linked against musl, so they do not impose a
+minimum glibc version on your distribution. On macOS, a downloaded binary is
+quarantined by Gatekeeper — clear it with
+`xattr -d com.apple.quarantine ~/.claude/bin/statusline ~/.claude/bin/cc-usage`.
+
+Claude Code still has to be pointed at the status line. Clone the repository and
+run `make statusline-apply`, or add the `statusLine` key to
+`~/.claude/settings.json` yourself, giving the absolute path to the binary.
+
+### From source
+
+Needs a Rust toolchain (1.87+); SQLite is bundled, so there is nothing else to
+install.
 
 ```sh
 git clone https://github.com/hmedkouri/cc-ledger.git
@@ -59,7 +88,7 @@ so anything else you changed since survives. Your ledger database is left alone.
 If you only want the `cc-usage` query tool and would rather skip the Makefile:
 
 ```sh
-cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.0 --bin cc-usage
+cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage
 ```
 
 ## The status line

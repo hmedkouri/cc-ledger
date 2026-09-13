@@ -1,6 +1,6 @@
 [package]
 name = "cc-ledger"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # Measured, not chosen: 1.86 fails on `unsigned_is_multiple_of` in src/render.rs.
 # The `msrv` CI job builds on exactly this toolchain so the number stays true.
