@@ -1,9 +1,11 @@
 //! SQLite storage for the token ledger.
 //!
 //! Several Claude Code sessions render their status line concurrently, so every
-//! connection runs in WAL mode with a short busy timeout. Writes are
-//! `INSERT OR IGNORE` on a stable dedupe key, which makes a lost pass, a
-//! repeated pass and a concurrent pass all harmless.
+//! connection runs in WAL mode with a short busy timeout. Writes upsert on a
+//! stable dedupe key, merging each token field with `max()`, which makes a lost
+//! pass, a repeated pass and a concurrent pass all harmless — and, unlike
+//! ignoring the conflict, leaves a partially-written first record recoverable,
+//! because usage is monotonic within a response.
 //!
 //! Timestamps are stored as UTC Unix seconds. Bucketing into days, weeks and
 //! months happens in local time, in Rust, so DST transitions land correctly —

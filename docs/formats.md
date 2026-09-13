@@ -498,8 +498,8 @@ rate-limit or prompt-cache window is due to reset.
 
 **Implication:** invocations are frequent and bursty, several per assistant turn,
 and concurrent across sessions. The ingest path must be cheap and must tolerate
-another process holding the write lock. `INSERT OR IGNORE` on a stable dedupe key
-makes a lost or repeated pass harmless.
+another process holding the write lock. Upserting on a stable dedupe key, with
+each token field merged by `max()`, makes a lost or repeated pass harmless.
 
 ---
 

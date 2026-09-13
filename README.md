@@ -14,35 +14,23 @@ Two binaries:
 * **`cc-usage`** — queries the ledger: totals, per-day/week/month breakdowns,
   grouped by model or project.
 
-## Accuracy
-
-These numbers are a local reconstruction from Claude Code's transcripts, not a
-read of Anthropic's billing. Requests that never produced an `assistant` record
-— retries, aborted turns, auxiliary generations, server-side tool calls — are
-billed but absent from the transcript, so the ledger runs under Claude Code's own
-`cost-state` accounting: across the 16 sessions carrying a snapshot it covers
-90.3% of the tokens Claude Code counted. That accounting is no gold standard
-either, having been observed dropping an entire model from a session's totals.
-
-Only transcripts still on disk can be read. Whatever `cleanupPeriodDays` removed
-before your first backfill is unrecoverable — on the development machine that
-left 11 days and roughly 2 481 requests. Raise the retention first; see below.
-
-`--cost` estimates API list price assuming standard speed, globally routed
-inference, no server-side tool charges, and the rates dated in `src/pricing.rs`.
-It says nothing about what a subscription costs.
-
-The transcript and payload formats are undocumented and shift between Claude Code
-releases, so a new release can break parsing silently until fixtures catch up —
-the `format_change` issue template exists for reporting that.
-
-Good for trends, budgeting, and comparing days and projects; not for disputing a
-bill or auditing against an invoice.
-
 ## Install
 
-Needs a Rust toolchain (1.85+). SQLite is bundled, so there is nothing else to
-install.
+**Step 0: raise `cleanupPeriodDays` first.** The backfill can only import
+transcripts that have not already been pruned, and those raw transcripts stay
+your only independent record if the parser is ever wrong. On the development
+machine the surviving transcripts reached back 11 days while Claude Code's own
+activity cache showed usage stretching back nine months.
+
+```jsonc
+// ~/.claude/settings.json
+{
+  "cleanupPeriodDays": 3650
+}
+```
+
+Then build and install. Needs a Rust toolchain (1.85+); SQLite is bundled, so
+there is nothing else to install.
 
 ```sh
 git clone https://github.com/hmedkouri/cc-ledger.git
@@ -62,30 +50,31 @@ location with `make install BIN_DIR=... LINK_DIR=...`.
 `statusline-apply` writes it, preserving every other key and keeping a timestamped
 backup. macOS code-signing is applied automatically and skipped elsewhere.
 
-## Set `cleanupPeriodDays` high before you start
+## The status line
 
-The ledger only records what it has seen. Anything Claude Code has already
-pruned is gone for good — no file on disk carries per-request token counts for
-it, so there is nothing left to recover from.
-
-This matters more than it sounds. On the machine this was developed against, the
-surviving transcripts reached back 11 days, while Claude Code's own activity
-cache showed usage stretching back nine months. Everything in between had
-already been deleted.
-
-Raise the retention so the raw transcripts survive as a second, independent
-record:
-
-```jsonc
-// ~/.claude/settings.json
-{
-  "cleanupPeriodDays": 3650
-}
+```
+~/p/T/cc-ledger main(+6878 -355) • ████████░░ 80% • 5h 50% (2h10m) 7d 38% (3d) • Opus 5 · 1M · high • today 91M
 ```
 
-Transcripts are plain JSONL and cost little to keep — tens of megabytes for
-months of work. Set this before running the backfill, since the backfill can
-only import what has not already been pruned.
+Directory and branch, then context, then rate limits, then model, then today.
+Context and limits sit together because they are the two signals that answer
+"should I stop soon"; today is last because a narrow pane clips from the right
+and that is the segment worth losing.
+
+Each rate limit shows time remaining until it resets — `2h10m` below a day,
+`3d` at or above one, and nothing at all when the payload carries no reset time
+or the moment has already passed.
+
+`today` sums every session across every project. Per-session and per-week totals
+are not on the line; `cc-usage sessions` and `cc-usage weekly` have them.
+
+`statusline --short` renders a compact variant: directory, context percent and
+today's tokens, dropping the bar but keeping the number. `statusline --cost`
+renders today as API-equivalent dollars instead of tokens.
+
+Rendering never blocks on ingest. The line is printed and flushed first; the
+transcript read then runs under a 150 ms wall-clock budget and is abandoned if
+it overruns, because the next invocation resumes from a stored byte cursor.
 
 ## Usage
 
@@ -118,23 +107,6 @@ Bucketing uses the timezone in force when you *query*, not when the request was
 made. Totals are therefore stable for anyone who stays in one zone, but the same
 ledger queried from a different `TZ` will move requests near midnight into
 adjacent days. Only the bucket boundaries shift; the stored timestamps never do.
-
-### The status line
-
-```
-~/p/T/cc-ledger  master(+2405 -6) • ██████░░░░ 63% • Opus 5 (high) • 5.5M session • today 8.6M / week 383M • 5h 31% 7d 59%
-```
-
-`session` counts the current `sessionId` only. Resuming a session continues that
-count — a resumed session can span days — while starting a fresh `claude`
-resets it. `today` and `week` sum every session across every project.
-
-`statusline --short` renders a compact variant: directory, context percent and
-today's tokens.
-
-Rendering never blocks on ingest. The line is printed and flushed first; the
-transcript read then runs under a 150 ms wall-clock budget and is abandoned if
-it overruns, because the next invocation resumes from a stored byte cursor.
 
 ## API Cost
 
@@ -179,6 +151,50 @@ Claude Code's payload into a `limits` table. On a subscription that is the live
 budget signal, and the ledger is the only place that history exists — the server
 keeps none, and the percentages vanish once a window rolls over.
 
+## Accuracy
+
+These numbers are a local reconstruction from Claude Code's transcripts, not a
+read of Anthropic's billing. Requests that never produced an `assistant` record
+— retries, aborted turns, auxiliary generations, server-side tool calls — are
+billed but absent from the transcript, so the ledger runs under Claude Code's own
+`cost-state` accounting: across the 16 sessions carrying a snapshot it covers
+90.3% of the tokens Claude Code counted. That accounting is no gold standard
+either, having been observed dropping an entire model from a session's totals.
+
+Only transcripts still on disk can be read. Whatever `cleanupPeriodDays` removed
+before your first backfill is unrecoverable — on the development machine that
+left 11 days and roughly 2 481 requests. Raise the retention first; see Install
+above.
+
+`--cost` estimates API list price assuming standard speed, globally routed
+inference, no server-side tool charges, and the rates dated in `src/pricing.rs`.
+It says nothing about what a subscription costs.
+
+The transcript and payload formats are undocumented and shift between Claude Code
+releases, so a new release can break parsing silently until fixtures catch up —
+the `format_change` issue template exists for reporting that.
+
+Good for trends, budgeting, and comparing days and projects; not for disputing a
+bill or auditing against an invoice.
+
+## Performance
+
+A cold render is budgeted under 20 ms in release, asserted in `tests/timing.rs`.
+It spawns no subprocess of any kind: the branch comes from reading `.git/HEAD`
+directly, and there is no network-facing dependency in the crate. For scale, the
+reference implementation this borrows its styling from spawns `git` twice on
+every single render — once to test whether the directory is a repository, then
+again to read the branch.
+
+Ingest runs only after the line has been printed and flushed. It is capped at a
+150 ms wall-clock budget and commits in batches of 500 lines, each batch writing
+its records and its cursor in one transaction, so a backlog is worked off
+incrementally across renders rather than stalling on one oversized pass.
+
+The one visible cost is that renders stay busy until an un-backfilled session
+has been caught up. Running `cc-usage backfill` once after install avoids it
+entirely.
+
 ## Where things live
 
 | What | Where |
@@ -188,9 +204,10 @@ keeps none, and the percentages vanish once a window rolls over.
 | Transcripts read | `~/.claude/projects/**/*.jsonl` |
 
 The database runs in WAL mode with a 250 ms busy timeout, because several
-Claude Code sessions write to it concurrently. Every insert is
-`INSERT OR IGNORE` on a stable key, so a repeated, concurrent or abandoned pass
-cannot double-count.
+Claude Code sessions write to it concurrently. Every write upserts on a stable
+key, merging each token field with `max()`, so a repeated, concurrent or
+abandoned pass cannot double-count — and a partially written first record is
+corrected rather than kept, because usage only ever grows within a response.
 
 ## The one thing worth knowing about the data
 
