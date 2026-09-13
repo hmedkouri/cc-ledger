@@ -16,7 +16,12 @@ Two binaries:
 
 ## Install
 
+Needs a Rust toolchain (1.85+). SQLite is bundled, so there is nothing else to
+install.
+
 ```sh
+git clone https://github.com/hmedkouri/cc-ledger.git
+cd cc-ledger
 make install          # builds, installs to ~/.claude/bin, prints the settings diff
 make statusline-apply # only this touches settings.json, and keeps a backup
 cc-usage backfill     # read every transcript currently on disk
@@ -72,6 +77,14 @@ cc-usage backfill --root ~/.claude/projects
 
 Dates are `YYYY-MM-DD` in local time. `--until` is exclusive. Columns are
 input / output / cache-create / cache-read / total.
+
+Every command takes `--help` for its full set of options:
+
+```sh
+cc-usage --help        # the available commands
+cc-usage daily --help  # the options for one command
+cc-usage --version
+```
 
 Timestamps are stored as UTC and bucketed in **local** time, so a day is 23 or
 25 hours long across a DST transition rather than a flat 86 400 seconds.
