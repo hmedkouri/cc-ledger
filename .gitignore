@@ -2,3 +2,10 @@
 *.db
 *.db-wal
 *.db-shm
+
+# A global gitignore with a `bin/` pattern would otherwise swallow the binary
+# sources, which are a real part of this crate.
+!src/bin/
+
+# Machine-local Claude Code config (proxy URLs, per-machine hooks).
+.claude/
