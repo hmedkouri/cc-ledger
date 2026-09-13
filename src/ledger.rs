@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 use crate::payload::RateLimit;
 use crate::transcript::{Cursor, UsageRecord};
 
+/// How long a writer waits for another session's lock before giving up.
+const WRITE_BUSY_TIMEOUT_MS: u64 = 250;
+
+/// How long the pre-render summary read waits. Deliberately far shorter than
+/// the ingest budget: that read happens before anything is on screen and is
+/// not covered by any deadline, so a contended database must not stall the
+/// status line.
+const RENDER_BUSY_TIMEOUT_MS: u64 = 50;
+
 pub struct Ledger {
     conn: Connection,
 }
@@ -68,6 +77,50 @@ pub struct SessionRow {
     pub tokens: i64,
 }
 
+/// The request and session writes shared by [`Ledger::ingest`] and
+/// [`Ledger::ingest_batch`], so both run identical SQL inside whatever
+/// transaction the caller opened.
+fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Result<usize> {
+    let mut inserted = 0usize;
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR IGNORE INTO requests
+         (dedupe_key, session_id, project_dir, model, ts, input, output,
+          cache_create, cache_read, thinking, cache_1h, cache_5m, source, transcript_path)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+    )?;
+    let mut session = tx.prepare_cached(
+        "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_seen  = max(last_seen,  excluded.last_seen),
+           first_seen = min(first_seen, excluded.first_seen),
+           project_dir = coalesce(sessions.project_dir, excluded.project_dir)",
+    )?;
+
+    for r in records {
+        inserted += stmt.execute(rusqlite::params![
+            r.dedupe_key,
+            r.session_id,
+            r.project_dir,
+            r.model,
+            r.ts,
+            r.input,
+            r.output,
+            r.cache_create,
+            r.cache_read,
+            r.thinking,
+            r.cache_1h,
+            r.cache_5m,
+            r.source.as_str(),
+            r.transcript_path,
+        ])?;
+        if let Some(sid) = &r.session_id {
+            session.execute(rusqlite::params![sid, r.project_dir, r.ts])?;
+        }
+    }
+    Ok(inserted)
+}
+
 /// `CC_LEDGER_DB`, else `$XDG_DATA_HOME/cc-ledger/ledger.db`, else
 /// `~/.local/share/cc-ledger/ledger.db`.
 pub fn default_db_path() -> PathBuf {
@@ -100,17 +153,36 @@ impl Ledger {
         Self::from_connection(conn)
     }
 
+    /// The pre-render summary read, which happens *before* anything reaches the
+    /// screen and is not covered by the ingest budget. A WAL reader almost
+    /// never blocks; the short wait only bounds the rare DDL race on a
+    /// first-ever open, so a contended database cannot stall the status line.
+    pub fn open_default_fast() -> Result<Self> {
+        let path = default_db_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let conn = Connection::open(&path)
+            .with_context(|| format!("opening ledger at {}", path.display()))?;
+        Self::from_connection_with(conn, RENDER_BUSY_TIMEOUT_MS)
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
     fn from_connection(conn: Connection) -> Result<Self> {
+        Self::from_connection_with(conn, WRITE_BUSY_TIMEOUT_MS)
+    }
+
+    fn from_connection_with(conn: Connection, busy_ms: u64) -> Result<Self> {
         // WAL lets a reader (rendering) proceed while another session writes.
         // journal_mode is a no-op on :memory:, hence query_row rather than execute.
         let _: String = conn
             .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
             .unwrap_or_default();
-        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        conn.busy_timeout(std::time::Duration::from_millis(busy_ms))?;
         conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
 
         let ledger = Ledger { conn };
@@ -179,45 +251,45 @@ impl Ledger {
             return Ok(0);
         }
         let tx = self.conn.transaction()?;
-        let mut inserted = 0usize;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO requests
-                 (dedupe_key, session_id, project_dir, model, ts, input, output,
-                  cache_create, cache_read, thinking, cache_1h, cache_5m, source, transcript_path)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            )?;
-            let mut session = tx.prepare_cached(
-                "INSERT INTO sessions (session_id, project_dir, first_seen, last_seen)
-                 VALUES (?1, ?2, ?3, ?3)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                   last_seen  = max(last_seen,  excluded.last_seen),
-                   first_seen = min(first_seen, excluded.first_seen),
-                   project_dir = coalesce(sessions.project_dir, excluded.project_dir)",
-            )?;
+        let inserted = insert_records(&tx, records)?;
+        tx.commit()?;
+        Ok(inserted)
+    }
 
-            for r in records {
-                inserted += stmt.execute(rusqlite::params![
-                    r.dedupe_key,
-                    r.session_id,
-                    r.project_dir,
-                    r.model,
-                    r.ts,
-                    r.input,
-                    r.output,
-                    r.cache_create,
-                    r.cache_read,
-                    r.thinking,
-                    r.cache_1h,
-                    r.cache_5m,
-                    r.source.as_str(),
-                    r.transcript_path,
-                ])?;
-                if let Some(sid) = &r.session_id {
-                    session.execute(rusqlite::params![sid, r.project_dir, r.ts])?;
-                }
-            }
-        }
+    /// Ingest one batch and advance the cursor **in a single transaction**.
+    ///
+    /// Atomicity matters in both directions. A kill between two separate
+    /// commits would either lose the records (cursor behind the data —
+    /// harmless, the next pass redoes them) or, far worse, leave the cursor
+    /// *ahead* of committed data and skip those requests permanently. One
+    /// transaction makes both impossible.
+    ///
+    /// Called with an empty `records` when a batch held only blank or
+    /// unparseable lines: the cursor must still advance, or the reader would
+    /// re-read them forever.
+    pub fn ingest_batch(
+        &mut self,
+        records: &[UsageRecord],
+        transcript_path: &str,
+        cursor: Cursor,
+        now: i64,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let inserted = insert_records(&tx, records)?;
+        tx.execute(
+            "INSERT INTO cursors (transcript_path, byte_offset, file_id, last_seen)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(transcript_path) DO UPDATE SET
+               byte_offset = excluded.byte_offset,
+               file_id     = excluded.file_id,
+               last_seen   = excluded.last_seen",
+            rusqlite::params![
+                transcript_path,
+                cursor.byte_offset as i64,
+                cursor.file_id as i64,
+                now
+            ],
+        )?;
         tx.commit()?;
         Ok(inserted)
     }

@@ -28,14 +28,26 @@ fn render_budget() -> Duration {
     }
 }
 
-/// Ingesting a 10 MB transcript from a fresh cursor.
-fn ingest_budget() -> Duration {
+/// One committed batch: lines scanned, inserted, and the cursor advanced, all
+/// in a single transaction.
+///
+/// This replaced a whole-file budget, which measured something the binary never
+/// does. The status line works to a 150 ms deadline and commits in batches, so
+/// the figure that matters is per batch — it must be small enough that many
+/// batches fit inside the deadline, which is what makes progress monotonic. The
+/// old whole-file number looked reassuring at 500 ms while the binary was in
+/// fact livelocked on any backlog above roughly 20 MB.
+fn batch_budget() -> Duration {
     if RELEASE_BUILD {
-        Duration::from_millis(500)
+        Duration::from_millis(25)
     } else {
-        Duration::from_secs(6)
+        Duration::from_millis(400)
     }
 }
+
+/// Mirrors `INGEST_BATCH_LINES` in the status-line binary, which owns the real
+/// constant. Kept in step by hand.
+const BATCH_LINES: usize = 500;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("cc-ledger-timing-{name}-{}", std::process::id()));
@@ -108,9 +120,12 @@ fn run_statusline(db: &PathBuf, payload: &str) {
     child.wait().expect("statusline exits");
 }
 
+/// One batch must be cheap enough that many of them fit the status line's
+/// 150 ms deadline — that headroom is exactly what makes progress monotonic
+/// when a backlog cannot be drained in a single pass.
 #[test]
-fn ingesting_a_ten_megabyte_transcript_stays_within_budget() {
-    let dir = temp_dir("ingest");
+fn one_committed_batch_stays_within_budget() {
+    let dir = temp_dir("batch");
     let path = dir.join("big.jsonl");
 
     {
@@ -131,26 +146,41 @@ fn ingesting_a_ten_megabyte_transcript_stays_within_budget() {
     assert!(size >= 10 * 1024 * 1024, "fixture is {size} bytes");
 
     let mut ledger = Ledger::open(&dir.join("ledger.db")).unwrap();
+    let key = path.to_string_lossy().to_string();
 
+    // Scan, insert and commit exactly one batch with its cursor: the unit of
+    // work the binary actually performs, rather than the whole file.
     let start = Instant::now();
-    let scan = transcript::scan(&path, None).expect("scan succeeds");
-    let inserted = ledger.ingest(&scan.records).expect("ingest succeeds");
+    let scan = transcript::scan_batch(&path, None, Some(BATCH_LINES)).expect("scan succeeds");
+    let inserted = ledger
+        .ingest_batch(&scan.records, &key, scan.cursor, 0)
+        .expect("ingest succeeds");
     let elapsed = start.elapsed();
 
     println!(
-        "ingest of {} MB / {} records: {elapsed:?} (budget {:?}, {} build)",
-        size / 1024 / 1024,
-        inserted,
-        ingest_budget(),
+        "one batch of {inserted} records: {elapsed:?} (budget {:?}, {} build)",
+        batch_budget(),
         if RELEASE_BUILD { "release" } else { "debug" }
     );
 
-    assert!(inserted > 5_000, "expected a large batch, got {inserted}");
+    assert_eq!(inserted, BATCH_LINES, "a full batch should be committed");
+    assert!(
+        !scan.exhausted,
+        "the batch should stop at its line cap, not at end of file"
+    );
     assert_eq!(scan.malformed, 0);
     assert!(
-        elapsed <= ingest_budget(),
-        "ingest took {elapsed:?}, budget {:?}",
-        ingest_budget()
+        elapsed <= batch_budget(),
+        "one batch took {elapsed:?}, budget {:?}",
+        batch_budget()
+    );
+
+    // The cursor advanced part-way, so the next batch resumes instead of
+    // repeating — the property the livelock violated.
+    assert!(scan.cursor.byte_offset > 0, "cursor did not advance");
+    assert!(
+        scan.cursor.byte_offset < size,
+        "only part of the file should be consumed by one batch"
     );
 
     std::fs::remove_dir_all(&dir).ok();

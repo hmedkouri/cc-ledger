@@ -40,3 +40,9 @@ chrono-tz = "0.10"
 [profile.release]
 opt-level = 2
 strip = true
+# Load-bearing, not a default worth inheriting silently: the status line wraps
+# its work in catch_unwind so a panic degrades to a fallback line instead of
+# exiting 101 and breaking Claude Code's status bar. catch_unwind cannot catch
+# anything under panic = "abort", so switching this for binary size would
+# quietly undo that guarantee.
+panic = "unwind"

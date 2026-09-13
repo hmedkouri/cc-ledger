@@ -88,6 +88,9 @@ pub struct Scan {
     pub malformed: usize,
     /// True when the file shrank or its identity changed and we restarted.
     pub restarted: bool,
+    /// False when the batch stopped at its line cap rather than at end of file,
+    /// meaning more remains and the caller should commit and loop.
+    pub exhausted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,12 +188,31 @@ impl RawLine {
     }
 }
 
-/// Read everything appended since `cursor`.
+/// Read everything appended since `cursor`, in one unbounded pass.
+///
+/// Suitable for `backfill`, which has no deadline. A caller working to a
+/// wall-clock budget must use [`scan_batch`] instead — see why there.
+pub fn scan(path: &Path, cursor: Option<Cursor>) -> std::io::Result<Scan> {
+    scan_batch(path, cursor, None)
+}
+
+/// Read at most `max_lines` complete lines appended since `cursor`.
+///
+/// Bounded batches exist so a caller can commit incrementally. Reading an
+/// entire backlog into a single transaction means a caller working to a
+/// deadline commits *nothing* once the backlog exceeds that deadline — and
+/// then repeats the same doomed pass on every invocation, making no progress
+/// ever. Batching makes progress monotonic: an abandoned pass loses at most
+/// the batch in flight.
 ///
 /// Only complete lines are consumed: a trailing partial line (a session
 /// writing as we read) is left for the next pass, and the cursor stops short
-/// of it. The caller advances its stored cursor only after committing.
-pub fn scan(path: &Path, cursor: Option<Cursor>) -> std::io::Result<Scan> {
+/// of it. The caller advances its stored cursor only by committing.
+pub fn scan_batch(
+    path: &Path,
+    cursor: Option<Cursor>,
+    max_lines: Option<usize>,
+) -> std::io::Result<Scan> {
     let file = File::open(path)?;
     let meta = file.metadata()?;
     let file_id = file_id(&meta);
@@ -213,8 +235,17 @@ pub fn scan(path: &Path, cursor: Option<Cursor>) -> std::io::Result<Scan> {
     let mut malformed = 0usize;
     let mut offset = start;
     let mut buf = Vec::new();
+    let mut lines = 0usize;
+    let mut exhausted = true;
 
     loop {
+        if max_lines.is_some_and(|cap| lines >= cap) {
+            // Stopped on a line boundary with more to read. The cursor is
+            // valid here precisely because only whole lines were consumed.
+            exhausted = false;
+            break;
+        }
+
         buf.clear();
         let n = reader.read_until(b'\n', &mut buf)?;
         if n == 0 {
@@ -225,6 +256,7 @@ pub fn scan(path: &Path, cursor: Option<Cursor>) -> std::io::Result<Scan> {
             break;
         }
         offset += n as u64;
+        lines += 1;
 
         let line = &buf[..n - 1];
         if line.iter().all(u8::is_ascii_whitespace) {
@@ -248,6 +280,7 @@ pub fn scan(path: &Path, cursor: Option<Cursor>) -> std::io::Result<Scan> {
         },
         malformed,
         restarted,
+        exhausted,
     })
 }
 

@@ -22,8 +22,14 @@ use cc_ledger::render::{self, RenderInput};
 use cc_ledger::transcript;
 
 /// Wall-clock budget for the post-render ingest. Exceeding it abandons this
-/// pass; the next invocation resumes from the stored cursor.
+/// pass at a committed batch boundary; the next invocation resumes from the
+/// stored cursor, having kept everything already committed.
 const INGEST_BUDGET: Duration = Duration::from_millis(150);
+
+/// Lines per committed batch. Small enough that a batch and its commit take a
+/// few milliseconds, so the deadline is checked often and an abandoned pass
+/// discards almost no work.
+const INGEST_BATCH_LINES: usize = 500;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,12 +49,26 @@ fn main() {
     let short = args.iter().any(|a| a == "--short");
     let home = std::env::var("HOME").unwrap_or_default();
 
+    // Last line of defence for "never break Claude Code". A panic anywhere
+    // below would otherwise exit 101 and spray a backtrace where the status
+    // bar is drawn; here it degrades to the fallback line and exit 0. The hook
+    // silences the default stderr message. `panic = "unwind"` is pinned in
+    // Cargo.toml because catch_unwind catches nothing under `panic = "abort"`.
+    std::panic::set_hook(Box::new(|_| {}));
+    if std::panic::catch_unwind(|| run(short, &home)).is_err() {
+        print_line(&render::fallback(None, &home));
+    }
+}
+
+/// Everything after argument handling, so that a panic in any of it — parsing,
+/// git, rendering, SQLite — is contained rather than fatal.
+fn run(short: bool, home: &str) {
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
 
     let Some(payload) = StatusPayload::parse(&stdin) else {
         // Unparseable payload: still print something, still exit 0.
-        print_line(&render::fallback(None, &home));
+        print_line(&render::fallback(None, home));
         return;
     };
 
@@ -62,7 +82,7 @@ fn main() {
         payload: &payload,
         summary: &summary,
         branch: branch.as_deref(),
-        home: &home,
+        home,
         short,
     });
     print_line(&line);
@@ -101,7 +121,9 @@ fn read_summary<Tz: chrono::TimeZone>(
     now: i64,
     tz: &Tz,
 ) -> Option<LedgerSummary> {
-    let ledger = Ledger::open_default().ok()?;
+    // Short lock wait: this runs before anything is on screen and no budget
+    // covers it, so it must not be able to stall the line.
+    let ledger = Ledger::open_default_fast().ok()?;
     ledger
         .summary(
             payload.session_id.as_deref(),
@@ -111,21 +133,25 @@ fn read_summary<Tz: chrono::TimeZone>(
         .ok()
 }
 
-/// Run the ingest on a worker thread and give up on it after the budget.
+/// Run the ingest on a worker thread and stop caring after the budget.
 ///
-/// Abandoning a pass is safe: SQLite's WAL keeps the database consistent, the
-/// cursor is only advanced after its transaction commits, and every insert is
-/// `INSERT OR IGNORE` on a stable key, so the next run redoes the work rather
-/// than losing or double-counting it.
+/// The worker checks the same deadline itself between batches, so it stops at
+/// a committed boundary rather than being killed mid-transaction; the
+/// `recv_timeout` here is only a backstop for one batch overrunning.
+///
+/// Abandoning a pass is safe because each batch commits its records and its
+/// cursor together: whatever committed stays, the cursor never runs ahead of
+/// the data, and the next invocation resumes from exactly there.
 fn ingest_within_budget(payload: StatusPayload, now: i64) {
+    let deadline = std::time::Instant::now() + INGEST_BUDGET;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(ingest(&payload, now));
+        let _ = tx.send(ingest(&payload, now, deadline));
     });
     let _ = rx.recv_timeout(INGEST_BUDGET);
 }
 
-fn ingest(payload: &StatusPayload, now: i64) -> anyhow::Result<()> {
+fn ingest(payload: &StatusPayload, now: i64, deadline: std::time::Instant) -> anyhow::Result<()> {
     let mut ledger = Ledger::open_default()?;
 
     // Cheap and time-sensitive: the rate-limit percentages are the only
@@ -137,18 +163,41 @@ fn ingest(payload: &StatusPayload, now: i64) -> anyhow::Result<()> {
     let Some(path) = payload.transcript_path.as_deref() else {
         return Ok(());
     };
-    ingest_one(&mut ledger, Path::new(path), now)
+    ingest_one(&mut ledger, Path::new(path), now, deadline)
 }
 
-fn ingest_one(ledger: &mut Ledger, path: &Path, now: i64) -> anyhow::Result<()> {
+/// Ingest in bounded batches, each committing its records and its cursor in one
+/// transaction, with the deadline checked between batches.
+///
+/// This used to read the whole backlog into a single transaction. When the
+/// backlog took longer than the budget the process exited before the commit,
+/// the cursor never moved, and every later invocation repeated the same doomed
+/// pass — measured, a transcript above roughly 20 MB was never ingested at all
+/// while burning the full budget on every render. Batching makes progress
+/// monotonic under any budget.
+fn ingest_one(
+    ledger: &mut Ledger,
+    path: &Path,
+    now: i64,
+    deadline: std::time::Instant,
+) -> anyhow::Result<()> {
     let key = path.to_string_lossy().to_string();
-    let cursor = ledger.cursor(&key).unwrap_or(None);
-    let scan = transcript::scan(path, cursor)?;
 
-    ledger.ingest(&scan.records)?;
-    // Only after the records are committed.
-    ledger.set_cursor(&key, scan.cursor, now)?;
-    Ok(())
+    loop {
+        let cursor = ledger.cursor(&key).unwrap_or(None);
+        let scan = transcript::scan_batch(path, cursor, Some(INGEST_BATCH_LINES))?;
+
+        // Nothing new: skip the write entirely rather than touch the cursor
+        // row on every render and contend for the lock for no reason.
+        let advanced = cursor.map(|c| c.byte_offset) != Some(scan.cursor.byte_offset);
+        if !scan.records.is_empty() || advanced {
+            ledger.ingest_batch(&scan.records, &key, scan.cursor, now)?;
+        }
+
+        if scan.exhausted || std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+    }
 }
 
 /// Resolve the branch by reading `.git/HEAD` rather than spawning `git`.
@@ -180,8 +229,15 @@ fn head_branch(git_dir: &Path) -> Option<String> {
     match head.strip_prefix("ref: refs/heads/") {
         Some(branch) => Some(branch.to_string()),
         // Detached HEAD: show an abbreviated sha, as git itself would.
-        None if head.len() >= 7 => Some(head[..7].to_string()),
-        None => None,
+        //
+        // Counted in chars, not bytes. `head[..7]` panics when byte 7 lands
+        // inside a multi-byte character, and a panic here exits 101 — which is
+        // exactly the "never break Claude Code" invariant this file claims to
+        // uphold. A HEAD file is attacker-influenced in any cloned repository.
+        None => {
+            let abbrev: String = head.chars().take(7).collect();
+            (abbrev.chars().count() == 7).then_some(abbrev)
+        }
     }
 }
 

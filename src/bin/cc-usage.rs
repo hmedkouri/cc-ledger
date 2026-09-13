@@ -365,11 +365,11 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
         match transcript::scan(path, cursor) {
             Ok(scan) => {
                 malformed += scan.malformed;
-                match ledger.ingest(&scan.records) {
-                    Ok(n) => {
-                        inserted += n;
-                        let _ = ledger.set_cursor(&key, scan.cursor, now);
-                    }
+                // Records and cursor in one transaction. An interrupted
+                // backfill must never leave the cursor ahead of the committed
+                // data, which would skip those requests permanently.
+                match ledger.ingest_batch(&scan.records, &key, scan.cursor, now) {
+                    Ok(n) => inserted += n,
                     Err(e) => {
                         failed += 1;
                         eprintln!("ingest failed for {}: {e}", path.display());

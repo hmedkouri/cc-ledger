@@ -126,6 +126,23 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Ingest runs on a worker thread that the binary abandons after its budget,
+/// and that thread dies with the process — so polling the database after one
+/// render cannot help: no further rows will ever appear from it. Re-render
+/// instead. Each pass commits its batches, so progress across passes is
+/// monotonic and this converges. Asserting after a single pass makes the test
+/// flaky on a loaded machine for a reason unrelated to what it tests.
+fn wait_for_rows(sandbox: &Sandbox, expected: i64) -> i64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let seen = sandbox.ledger().request_count().unwrap_or(0);
+        if seen >= expected || std::time::Instant::now() >= deadline {
+            return seen;
+        }
+        sandbox.run(&sandbox.payload(), &[]);
+    }
+}
+
 #[test]
 fn renders_the_line_and_ingests_the_transcript() {
     let sandbox = Sandbox::new("full");
@@ -150,12 +167,12 @@ fn renders_the_line_and_ingests_the_transcript() {
     assert_eq!(text.lines().count(), 1, "exactly one line: {text}");
 
     // --- the resulting ledger rows ----------------------------------------
-    let ledger = sandbox.ledger();
     assert_eq!(
-        ledger.request_count().unwrap(),
+        wait_for_rows(&sandbox, 3),
         3,
         "three requests from five usage lines"
     );
+    let ledger = sandbox.ledger();
 
     let rows = ledger.rows(None, None).unwrap();
     let output: i64 = rows.iter().map(|r| r.output).sum();
@@ -238,6 +255,68 @@ fn help_and_version_are_answered_without_a_payload() {
             "{flag} printed: {text}"
         );
     }
+}
+
+/// The detached-HEAD abbreviation used to slice `head[..7]` by *byte* index,
+/// which panics when byte 7 lands inside a multi-byte character. That exited
+/// 101 and printed a backtrace where Claude Code draws its status bar — a
+/// direct violation of the invariant this file exists to defend, reachable
+/// from any cloned repository. Asserts both the char-safe slicing and the
+/// catch_unwind net behind it.
+#[test]
+fn a_git_head_that_once_panicked_still_exits_zero() {
+    let dir = std::env::temp_dir().join(format!(
+        "cc-ledger-head-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    // "abcdef" + 'é' is eight bytes, so byte 7 falls inside the 'é'. No
+    // "ref: " prefix, so it is treated as a detached HEAD and abbreviated.
+    std::fs::write(dir.join(".git").join("HEAD"), "abcdef\u{e9}\n").unwrap();
+
+    let payload = serde_json::json!({
+        "cwd": dir.to_string_lossy(),
+        "workspace": { "current_dir": dir.to_string_lossy() },
+        "model": { "display_name": "Opus 5" },
+    })
+    .to_string();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_statusline"))
+        .env("CC_LEDGER_DB", dir.join("ledger.db"))
+        .env("HOME", "/home/user")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("statusline runs");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("statusline exits");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "must exit 0, got {:?}; stderr: {stderr}",
+        out.status
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "must still print a usable line"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "no panic message should reach stderr: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The status line must never break Claude Code, whatever arrives on stdin.
