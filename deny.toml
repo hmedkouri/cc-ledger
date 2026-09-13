@@ -1,0 +1,58 @@
+# Policy for `cargo deny check bans advisories sources`.
+#
+# CONTRIBUTING states two constraints that were, until this file, enforced only
+# by whoever happened to read the pull request: no new dependency for what a few
+# lines of stdlib can do, and nothing network-facing, ever. `cargo audit` does
+# not check either of those — it reports known vulnerabilities in what you
+# already depend on, and would happily stay green while a PR added an HTTP
+# client. The `[bans]` section below is what actually holds the line.
+#
+# The licence check is deliberately not run: an allow-list would need editing
+# every time a transitive dependency changes its SPDX expression, which is
+# maintenance for a risk this project does not carry.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# Duplicate versions are a size and build-time annoyance, not a correctness
+# problem, and the tree is small enough that policing them is noise.
+multiple-versions = "allow"
+wildcards = "deny"
+
+# Nothing here is in the tree today — 48 crates, none network-capable. These
+# entries exist so that adding one is a deliberate, visible act rather than a
+# transitive surprise. If a genuine need appears, delete the line and say why
+# in the commit message.
+deny = [
+    # HTTP and TLS clients
+    { name = "reqwest" },
+    { name = "ureq" },
+    { name = "isahc" },
+    { name = "attohttpc" },
+    { name = "curl" },
+    { name = "curl-sys" },
+    { name = "hyper" },
+    { name = "h2" },
+    { name = "rustls" },
+    { name = "native-tls" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    # Async runtimes and raw sockets. The status line is a short-lived process
+    # that does blocking file IO; an executor here would mean something has
+    # started doing work that does not belong on the render path.
+    { name = "tokio" },
+    { name = "async-std" },
+    { name = "mio" },
+    { name = "socket2" },
+    { name = "quinn" },
+    # DNS
+    { name = "hickory-resolver" },
+    { name = "trust-dns-resolver" },
+]

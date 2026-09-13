@@ -46,10 +46,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
 
-  audit:
+  # Advisories, plus the bans that keep the tree free of anything network-facing.
+  # cargo audit alone would report vulnerabilities in existing dependencies while
+  # staying green on a PR that added an HTTP client; see deny.toml.
+  deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: rustsec/audit-check@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          command: check bans advisories sources
