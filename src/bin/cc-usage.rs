@@ -543,6 +543,7 @@ fn print_cost_breakdown(t: &Totals) {
     println!();
     println!("API Cost — list-price estimate of what this usage would have cost");
     println!("on the API. It is not what a subscription charges.");
+    println!("Reconstructed from local transcripts, not billing — see Accuracy in README.");
     println!();
     let line = |label: &str, amount: f64| {
         let share = if t.cost.total() > 0.0 {

@@ -14,6 +14,31 @@ Two binaries:
 * **`cc-usage`** — queries the ledger: totals, per-day/week/month breakdowns,
   grouped by model or project.
 
+## Accuracy
+
+These numbers are a local reconstruction from Claude Code's transcripts, not a
+read of Anthropic's billing. Requests that never produced an `assistant` record
+— retries, aborted turns, auxiliary generations, server-side tool calls — are
+billed but absent from the transcript, so the ledger runs under Claude Code's own
+`cost-state` accounting: across the 16 sessions carrying a snapshot it covers
+90.3% of the tokens Claude Code counted. That accounting is no gold standard
+either, having been observed dropping an entire model from a session's totals.
+
+Only transcripts still on disk can be read. Whatever `cleanupPeriodDays` removed
+before your first backfill is unrecoverable — on the development machine that
+left 11 days and roughly 2 481 requests. Raise the retention first; see below.
+
+`--cost` estimates API list price assuming standard speed, globally routed
+inference, no server-side tool charges, and the rates dated in `src/pricing.rs`.
+It says nothing about what a subscription costs.
+
+The transcript and payload formats are undocumented and shift between Claude Code
+releases, so a new release can break parsing silently until fixtures catch up —
+the `format_change` issue template exists for reporting that.
+
+Good for trends, budgeting, and comparing days and projects; not for disputing a
+bill or auditing against an invoice.
+
 ## Install
 
 Needs a Rust toolchain (1.85+). SQLite is bundled, so there is nothing else to

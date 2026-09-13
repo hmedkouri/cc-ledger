@@ -368,6 +368,14 @@ Two distinct effects, both confirmed:
    auxiliary generations — are billed and counted by `cost-state` but are absent
    from the JSONL entirely. This is why our sums run a few percent under, while
    `thinkingTokens` (produced only by recorded assistant turns) matches exactly.
+
+   **Server-side tool charges go missing the same way** [verified]. Web search is
+   billed per request, at $10 per 1 000. Summing
+   `server_tool_use.web_search_requests` across every assistant record on disk
+   gives **0**, while a `cost-state` snapshot records `webSearchRequests: 1` for
+   one session. That search ran inside a request that produced no `assistant`
+   record, so no per-request column could have captured it — which is also why
+   storing `server_tool_use` would not close the gap.
 2. **`cost-state` can silently drop an entire model.** The one inverted session
    (project and session redacted) used two models —
    `claude-fable-5-1` (23 requests, 24 521 output) and `claude-opus-5` (20
