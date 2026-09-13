@@ -1,0 +1,38 @@
+[package]
+name = "cc-ledger"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code status line backed by a persistent per-request token ledger"
+license = "MIT"
+
+[lib]
+name = "cc_ledger"
+path = "src/lib.rs"
+
+[[bin]]
+name = "statusline"
+path = "src/bin/statusline.rs"
+
+[[bin]]
+name = "cc-usage"
+path = "src/bin/cc-usage.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# clap is only needed by the cc-usage binary; the status line must stay small
+# and fast, so it never touches it.
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# Test-only: real DST transitions need a real tz database. Never linked into
+# either shipped binary.
+chrono-tz = "0.10"
+
+[profile.release]
+opt-level = 2
+strip = true
