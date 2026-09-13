@@ -59,7 +59,14 @@ install-bins: build
 	@echo "Linked cc-usage into $(LINK_DIR)"
 	@case ":$$PATH:" in \
 		*":$(LINK_DIR):"*) ;; \
-		*) echo "WARNING: $(LINK_DIR) is not on your PATH - add it, or run cc-usage as $(BIN_DIR)/cc-usage" ;; \
+		*) case "$$SHELL" in \
+			*/zsh) rc="~/.zshrc" ;; \
+			*) rc="~/.bashrc" ;; \
+		esac; \
+		echo "WARNING: $(LINK_DIR) is not on your PATH."; \
+		echo "  Either run it in full as $(BIN_DIR)/cc-usage,"; \
+		echo "  or append this to $$rc and start a new shell:"; \
+		echo "      export PATH=\"\$$HOME/.claude/bin:\$$PATH\"" ;; \
 	esac
 ifeq ($(UNAME),Darwin)
 	@echo "Signing for macOS Gatekeeper"

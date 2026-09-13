@@ -34,7 +34,7 @@ mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
 Point Claude Code at it by adding
 `"statusLine": {"type": "command", "command": "/home/you/.claude/bin/statusline"}`
 to `~/.claude/settings.json` — the path must be absolute — or clone and run
-`make statusline-apply`, which writes it for you.
+`make statusline-apply`.
 
 ### From source
 
@@ -42,20 +42,28 @@ Rust 1.87+; SQLite is bundled.
 
 ```sh
 git clone https://github.com/hmedkouri/cc-ledger.git && cd cc-ledger
-make install          # → ~/.claude/bin, and symlinks cc-usage into ~/.local/bin (statusline is never typed, so only cc-usage needs PATH); prints the settings diff without applying it
+make install          # both binaries → ~/.claude/bin; prints the settings diff without applying it
 make statusline-apply # the only step that edits settings.json; keeps a timestamped backup
 ```
 
-Run `cc-usage backfill` once to read the transcripts already on disk.
-`make uninstall` reverses everything and leaves the database alone; `make help`
-covers the remaining targets and options. For the query tool by itself:
+Run `~/.claude/bin/cc-usage backfill` once to ingest existing transcripts.
+`make uninstall` reverses everything and leaves the database; `make help` covers
+the rest. For the query tool alone:
 `cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage`.
+
+**Putting `cc-usage` on your PATH.** Optional; `statusline` never needs it.
+Append to `~/.zshrc` or `~/.bashrc`:
+
+```sh
+export PATH="$HOME/.claude/bin:$PATH"
+```
+
+`make install` also symlinks `cc-usage` into `~/.local/bin`, and warns when that
+is not on your `PATH`. Either way, only new shells see it.
 
 ## The status line
 
-```
-~/p/T/cc-ledger main(+412 -37) • ████████░░ 80% • 5h 50% (2h10m) 7d 38% (3d) • Opus 5 · 1M · high • today 91M
-```
+The screenshot at the top of this README is a live example.
 
 Directory and branch, then context, then rate limits, then model, then today.
 Context and limits sit together because they are the two signals that answer
