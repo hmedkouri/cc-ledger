@@ -16,8 +16,9 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Rust 1.85+ (2021 edition). The only unusual dependency is `rusqlite` with the
-`bundled` feature, so no system SQLite is required.
+Rust 1.87+ (2021 edition), enforced by the `msrv` job in CI. The only unusual
+dependency is `rusqlite` with the `bundled` feature, so no system SQLite is
+required.
 
 ## Never commit real transcript data
 
