@@ -159,7 +159,11 @@ fn renders_the_line_and_ingests_the_transcript() {
     assert!(text.contains(&leaf), "path keeps its last segment: {text}");
     assert!(text.contains("main"), "branch read from .git/HEAD: {text}");
     assert!(text.contains("Opus 5"), "model: {text}");
-    assert!(text.contains("(high)"), "effort: {text}");
+    assert!(
+        text.contains("· 200k"),
+        "context window in model segment: {text}"
+    );
+    assert!(text.contains("· high"), "effort in model segment: {text}");
     assert!(text.contains("42%"), "context percent: {text}");
     assert!(text.contains("(+12 -3)"), "lines changed: {text}");
     assert!(text.contains("5h 20%"), "five hour limit: {text}");

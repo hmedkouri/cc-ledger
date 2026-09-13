@@ -33,9 +33,10 @@ pub struct Ledger {
 /// The few numbers the status line needs. Every one is an indexed range scan.
 #[derive(Debug, Default, PartialEq)]
 pub struct LedgerSummary {
-    pub session_tokens: i64,
     pub today_tokens: i64,
-    pub week_tokens: i64,
+    /// Today's tokens priced at API list rates, for `statusline --cost`.
+    /// Computed from the same single query, never a second pass over rows.
+    pub today_cost: f64,
 }
 
 /// One ledger row, for `cc-usage` to aggregate.
@@ -535,38 +536,41 @@ impl Ledger {
 
     /// `day_start` and `week_start` are local-time boundaries as UTC seconds,
     /// computed by the caller so this stays a pure indexed range scan.
-    pub fn summary(
-        &self,
-        session_id: Option<&str>,
-        day_start: i64,
-        week_start: i64,
-    ) -> Result<LedgerSummary> {
-        let total = "coalesce(sum(input + output + cache_create + cache_read), 0)";
-
-        let today_tokens: i64 = self.conn.query_row(
-            &format!("SELECT {total} FROM requests WHERE ts >= ?1"),
-            [day_start],
-            |r| r.get(0),
+    /// One indexed range scan, grouped by model so the cost can be derived in
+    /// the same pass — pricing is per-model, so a single `sum()` could not be
+    /// priced afterwards.
+    ///
+    /// `day_start` is used as the pricing timestamp for the whole day. No rate
+    /// in the table varies within a day, so grouping by model rather than by
+    /// request loses nothing (`src/pricing.rs`).
+    pub fn summary(&self, day_start: i64) -> Result<LedgerSummary> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT coalesce(model, 'unknown'),
+                    coalesce(sum(input), 0), coalesce(sum(output), 0),
+                    coalesce(sum(cache_1h), 0), coalesce(sum(cache_5m), 0),
+                    coalesce(sum(cache_read), 0),
+                    coalesce(sum(input + output + cache_create + cache_read), 0)
+             FROM requests WHERE ts >= ?1 GROUP BY 1",
         )?;
-        let week_tokens: i64 = self.conn.query_row(
-            &format!("SELECT {total} FROM requests WHERE ts >= ?1"),
-            [week_start],
-            |r| r.get(0),
-        )?;
-        let session_tokens: i64 = match session_id {
-            Some(sid) => self.conn.query_row(
-                &format!("SELECT {total} FROM requests WHERE session_id = ?1"),
-                [sid],
-                |r| r.get(0),
-            )?,
-            None => 0,
-        };
 
-        Ok(LedgerSummary {
-            session_tokens,
-            today_tokens,
-            week_tokens,
-        })
+        let mut rows = stmt.query([day_start])?;
+        let mut summary = LedgerSummary::default();
+        while let Some(row) = rows.next()? {
+            let model: String = row.get(0)?;
+            summary.today_tokens += row.get::<_, i64>(6)?;
+            if let Some(cost) = crate::pricing::cost_of(
+                &model,
+                day_start,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ) {
+                summary.today_cost += cost.total();
+            }
+        }
+        Ok(summary)
     }
 
     /// Rows in `[since, until)`, ordered by time, for `cc-usage` to bucket.
@@ -814,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_counts_only_the_requested_windows() {
+    fn summary_counts_only_today() {
         let mut l = Ledger::open_in_memory().unwrap();
         l.ingest(&[
             record("old", 1_000, 10),
@@ -825,17 +829,42 @@ mod tests {
 
         // Each record carries input 1 + cache_create 10 + cache_read 100 = 111
         // of fixed weight, plus its own output.
-        let s = l.summary(Some("s1"), 60_000, 40_000).unwrap();
-        assert_eq!(s.today_tokens, 141); // "newest" only: 111 + 30
-        assert_eq!(s.week_tokens, 272); // "recent" (131) + "newest" (141)
-        assert_eq!(s.session_tokens, 393); // all three: 121 + 131 + 141
+        assert_eq!(l.summary(60_000).unwrap().today_tokens, 141); // "newest" only
+        assert_eq!(l.summary(40_000).unwrap().today_tokens, 272); // plus "recent"
+        assert_eq!(l.summary(0).unwrap().today_tokens, 393); // all three
     }
 
+    /// The cost comes from the same query as the tokens, priced per model.
     #[test]
-    fn summary_without_session_reports_zero_session_tokens() {
+    fn summary_prices_today_in_the_same_pass() {
         let mut l = Ledger::open_in_memory().unwrap();
-        l.ingest(&[record("a", 1_000, 10)]).unwrap();
-        assert_eq!(l.summary(None, 0, 0).unwrap().session_tokens, 0);
+        let mut opus = record("a", 1_000, 0);
+        opus.model = "claude-opus-5".into();
+        opus.input = 0;
+        opus.output = 1_000_000; // $25 at Opus output rates
+        opus.cache_create = 0;
+        opus.cache_read = 0;
+        opus.cache_1h = 0;
+        opus.cache_5m = 0;
+
+        let mut unknown = record("b", 1_000, 0);
+        unknown.model = "claude-unreleased-9".into();
+        unknown.input = 0;
+        unknown.output = 1_000_000;
+        unknown.cache_create = 0;
+        unknown.cache_read = 0;
+        unknown.cache_1h = 0;
+        unknown.cache_5m = 0;
+
+        l.ingest(&[opus, unknown]).unwrap();
+        let s = l.summary(0).unwrap();
+
+        assert_eq!(s.today_tokens, 2_000_000, "both models counted in tokens");
+        assert!(
+            (s.today_cost - 25.0).abs() < 1e-9,
+            "only the priceable model contributes cost: {}",
+            s.today_cost
+        );
     }
 
     #[test]

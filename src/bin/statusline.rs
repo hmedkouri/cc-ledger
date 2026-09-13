@@ -47,6 +47,7 @@ fn main() {
     }
 
     let short = args.iter().any(|a| a == "--short");
+    let cost = args.iter().any(|a| a == "--cost");
     let home = std::env::var("HOME").unwrap_or_default();
 
     // Last line of defence for "never break Claude Code". A panic anywhere
@@ -55,14 +56,14 @@ fn main() {
     // silences the default stderr message. `panic = "unwind"` is pinned in
     // Cargo.toml because catch_unwind catches nothing under `panic = "abort"`.
     std::panic::set_hook(Box::new(|_| {}));
-    if std::panic::catch_unwind(|| run(short, &home)).is_err() {
+    if std::panic::catch_unwind(|| run(short, cost, &home)).is_err() {
         print_line(&render::fallback(None, &home));
     }
 }
 
 /// Everything after argument handling, so that a panic in any of it — parsing,
 /// git, rendering, SQLite — is contained rather than fatal.
-fn run(short: bool, home: &str) {
+fn run(short: bool, cost: bool, home: &str) {
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
 
@@ -74,7 +75,7 @@ fn run(short: bool, home: &str) {
 
     let now = chrono::Local::now().timestamp();
     let tz = chrono::Local;
-    let summary = read_summary(&payload, now, &tz).unwrap_or_default();
+    let summary = read_summary(now, &tz).unwrap_or_default();
 
     let branch = payload.display_dir().and_then(|d| git_branch(Path::new(d)));
 
@@ -84,6 +85,8 @@ fn run(short: bool, home: &str) {
         branch: branch.as_deref(),
         home,
         short,
+        now,
+        cost,
     });
     print_line(&line);
 
@@ -98,10 +101,11 @@ fn print_usage() {
     println!("payload on stdin, prints one line, then ingests new usage records from");
     println!("the session transcript into the ledger.");
     println!();
-    println!("Usage: statusline [--short] < payload.json");
+    println!("Usage: statusline [--short] [--cost] < payload.json");
     println!();
     println!("Options:");
     println!("      --short    Compact variant: directory, context percent, today's tokens");
+    println!("      --cost     Render today as API-equivalent dollars rather than tokens");
     println!("  -h, --help     Print help");
     println!("  -V, --version  Print version");
     println!();
@@ -116,21 +120,11 @@ fn print_line(line: &str) {
     let _ = out.flush();
 }
 
-fn read_summary<Tz: chrono::TimeZone>(
-    payload: &StatusPayload,
-    now: i64,
-    tz: &Tz,
-) -> Option<LedgerSummary> {
+fn read_summary<Tz: chrono::TimeZone>(now: i64, tz: &Tz) -> Option<LedgerSummary> {
     // Short lock wait: this runs before anything is on screen and no budget
     // covers it, so it must not be able to stall the line.
     let ledger = Ledger::open_default_fast().ok()?;
-    ledger
-        .summary(
-            payload.session_id.as_deref(),
-            bucket::day_start(now, tz),
-            bucket::week_start(now, tz),
-        )
-        .ok()
+    ledger.summary(bucket::day_start(now, tz)).ok()
 }
 
 /// Run the ingest on a worker thread and stop caring after the budget.

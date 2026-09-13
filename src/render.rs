@@ -32,16 +32,27 @@ const ICON_LIMITS: char = '\u{f252}';
 const BAR_WIDTH: usize = 10;
 const BRANCH_MAX: usize = 32;
 
-/// Everything the line needs. `branch` and `home` are resolved by the caller so
-/// this function stays pure.
+/// Everything the line needs. `branch`, `home` and `now` are resolved by the
+/// caller so this function stays pure — in particular the reset countdown is
+/// derived from `now`, never from the clock, so rendering is deterministic and
+/// testable at any instant.
 pub struct RenderInput<'a> {
     pub payload: &'a StatusPayload,
     pub summary: &'a LedgerSummary,
     pub branch: Option<&'a str>,
     pub home: &'a str,
     pub short: bool,
+    /// Unix seconds. Only used to turn `resets_at` into time remaining.
+    pub now: i64,
+    /// Render today as API-equivalent dollars rather than tokens.
+    pub cost: bool,
 }
 
+/// Order is deliberate: directory, context, limits, model, today.
+///
+/// Context and limits are the two "should I stop soon" signals, so they sit
+/// together. Today is the least actionable segment and goes last, because a
+/// narrow pane clips from the right and that is the thing worth losing.
 pub fn render(input: &RenderInput) -> String {
     let p = input.payload;
 
@@ -54,38 +65,22 @@ pub fn render(input: &RenderInput) -> String {
     if input.short {
         // Compact variant: directory, context, today. Nothing else earns space.
         if input.summary.today_tokens > 0 {
-            segments.push(format!(
-                "{GREY}{ICON_TOKENS} {RESET}{}",
-                format_tokens(input.summary.today_tokens as u64)
-            ));
+            segments.push(today_segment(input));
         }
         return join(&head(p, input, true), &segments);
     }
 
-    if let Some(model) = p.model_name() {
-        let effort = match p.effort_level() {
-            Some(level) => format!("{GREY} ({level})"),
-            None => String::new(),
-        };
-        segments.push(format!("{TEAL}{ICON_MODEL} {ORANGE}{model}{effort}{RESET}"));
-    }
-
-    segments.push(format!(
-        "{GREY}{ICON_TOKENS} {RESET}{} {GREY}session{RESET}",
-        format_tokens(input.summary.session_tokens as u64)
-    ));
-
-    segments.push(format!(
-        "{GREY}today {RESET}{} {GREY}/ week {RESET}{}",
-        format_tokens(input.summary.today_tokens as u64),
-        format_tokens(input.summary.week_tokens as u64),
-    ));
-
     // Absent on some accounts and gone from the payload entirely for a stretch
     // earlier this year, so its absence is normal and silent.
-    if let Some(limits) = rate_limit_segment(p) {
+    if let Some(limits) = rate_limit_segment(p, input.now) {
         segments.push(limits);
     }
+
+    if let Some(model) = model_segment(p) {
+        segments.push(model);
+    }
+
+    segments.push(today_segment(input));
 
     join(&head(p, input, false), &segments)
 }
@@ -144,29 +139,106 @@ fn context_segment(pct: f64, short: bool) -> String {
     )
 }
 
-fn rate_limit_segment(p: &StatusPayload) -> Option<String> {
-    let five = p.five_hour().and_then(|r| r.used_percentage);
-    let seven = p.seven_day().and_then(|r| r.used_percentage);
-    if five.is_none() && seven.is_none() {
+fn rate_limit_segment(p: &StatusPayload, now: i64) -> Option<String> {
+    let five = p.five_hour();
+    let seven = p.seven_day();
+    if five.and_then(|r| r.used_percentage).is_none()
+        && seven.and_then(|r| r.used_percentage).is_none()
+    {
         return None;
     }
 
     let mut parts = Vec::new();
-    if let Some(v) = five {
+    for (label, limit) in [("5h", five), ("7d", seven)] {
+        let Some(limit) = limit else { continue };
+        let Some(pct) = limit.used_percentage else {
+            continue;
+        };
+        let until = match countdown(limit.resets_at, now) {
+            Some(remaining) => format!("{GREY} ({remaining})"),
+            None => String::new(),
+        };
         parts.push(format!(
-            "{GREY}5h {}{}%{RESET}",
-            pct_colour(v),
-            v.round() as u32
-        ));
-    }
-    if let Some(v) = seven {
-        parts.push(format!(
-            "{GREY}7d {}{}%{RESET}",
-            pct_colour(v),
-            v.round() as u32
+            "{GREY}{label} {}{}%{until}{RESET}",
+            pct_colour(pct),
+            pct.round() as u32
         ));
     }
     Some(format!("{GREY}{ICON_LIMITS} {RESET}{}", parts.join(" ")))
+}
+
+/// Time until `resets_at`: `2h10m` below a day, `3d` at or above one.
+///
+/// `None` when the field is absent or the moment has passed. A payload keeps a
+/// stale `resets_at` until its next refresh, and counting down to something
+/// that already happened is worse than saying nothing.
+fn countdown(resets_at: Option<i64>, now: i64) -> Option<String> {
+    let remaining = resets_at?.checked_sub(now)?;
+    if remaining <= 0 {
+        return None;
+    }
+    if remaining >= 86_400 {
+        return Some(format!("{}d", remaining / 86_400));
+    }
+    let hours = remaining / 3_600;
+    let minutes = (remaining % 3_600) / 60;
+    Some(if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else {
+        format!("{minutes}m")
+    })
+}
+
+/// `Opus 5 · 1M · high` — name, context window, effort, each omitted if absent.
+fn model_segment(p: &StatusPayload) -> Option<String> {
+    let name = strip_parenthetical(p.model_name()?);
+
+    let mut extras = Vec::new();
+    if let Some(size) = p
+        .context_window
+        .as_ref()
+        .and_then(|c| c.context_window_size)
+    {
+        extras.push(format_window(size));
+    }
+    if let Some(level) = p.effort_level() {
+        extras.push(level.to_string());
+    }
+
+    let mut out = format!("{TEAL}{ICON_MODEL} {ORANGE}{name}{RESET}");
+    for extra in extras {
+        out.push_str(&format!("{GREY} · {extra}{RESET}"));
+    }
+    Some(out)
+}
+
+/// `"Opus 5 (1M context)"` → `"Opus 5"`. The window is rendered as its own
+/// part, so leaving it in the display name would print it twice.
+fn strip_parenthetical(name: &str) -> &str {
+    match name.find('(') {
+        Some(i) => name[..i].trim_end(),
+        None => name,
+    }
+}
+
+/// `1000000` → `1M`, `200000` → `200k`.
+fn format_window(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn today_segment(input: &RenderInput) -> String {
+    let value = if input.cost {
+        format!("${}", format_cost(input.summary.today_cost))
+    } else {
+        format_tokens(input.summary.today_tokens as u64)
+    };
+    format!("{GREY}{ICON_TOKENS} today {RESET}{value}")
 }
 
 fn join(head: &str, segments: &[String]) -> String {
@@ -307,13 +379,17 @@ mod tests {
 
     fn summary() -> LedgerSummary {
         LedgerSummary {
-            session_tokens: 12_345,
             today_tokens: 250_000,
-            week_tokens: 1_200_000,
+            today_cost: 41.20,
         }
     }
 
     const FULL: &str = include_str!("../tests/fixtures/payload_full.json");
+
+    /// Chosen relative to the fixture's `resets_at` values so the countdowns
+    /// land on exact, readable boundaries: 2h10m to the five-hour reset and
+    /// 11 days to the seven-day one.
+    const NOW: i64 = 1_788_608_452;
 
     fn input<'a>(
         p: &'a StatusPayload,
@@ -327,6 +403,8 @@ mod tests {
             branch,
             home: "/home/user",
             short,
+            now: NOW,
+            cost: false,
         }
     }
 
@@ -340,16 +418,116 @@ mod tests {
         assert!(text.contains("~/p/example"), "shortened path: {text}");
         assert!(text.contains("main"), "branch: {text}");
         assert!(text.contains("(+188 -10)"), "lines changed: {text}");
-        assert!(text.contains("Opus 5"), "model: {text}");
-        assert!(text.contains("(high)"), "effort: {text}");
         assert!(text.contains("38%"), "context percent: {text}");
-        // 12 345 tokens is 12.345k, which crosses the 10k threshold into
-        // whole-k formatting.
-        assert!(text.contains("12k session"), "session tokens: {text}");
-        assert!(text.contains("250k"), "today tokens: {text}");
-        assert!(text.contains("1.2M"), "week tokens: {text}");
-        assert!(text.contains("5h 13%"), "five hour limit: {text}");
-        assert!(text.contains("7d 44%"), "seven day limit: {text}");
+        assert!(text.contains("5h 13% (2h10m)"), "five hour limit: {text}");
+        assert!(text.contains("7d 44% (11d)"), "seven day limit: {text}");
+        assert!(
+            text.contains("Opus 5 · 200k · high"),
+            "model segment: {text}"
+        );
+        assert!(text.contains("today 250k"), "today tokens: {text}");
+
+        // Dropped from the default line; still available in `cc-usage`.
+        assert!(!text.contains("session"), "session is gone: {text}");
+        assert!(!text.contains("week"), "week is gone: {text}");
+    }
+
+    /// The order is the whole point of the layout: the two "should I stop"
+    /// signals adjacent, and the least actionable segment last so that is what
+    /// a narrow pane clips.
+    #[test]
+    fn segments_render_in_the_documented_order() {
+        let p = payload(FULL);
+        let s = summary();
+        let text = strip_ansi(&render(&input(&p, &s, Some("main"), false)));
+
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle} in {text}"))
+        };
+        assert!(at("main") < at("38%"), "branch before context: {text}");
+        assert!(at("38%") < at("5h"), "context before limits: {text}");
+        assert!(at("5h") < at("Opus 5"), "limits before model: {text}");
+        assert!(at("Opus 5") < at("today"), "model before today: {text}");
+    }
+
+    #[test]
+    fn countdown_formats_and_omits_correctly() {
+        let now = 1_000_000;
+        assert_eq!(countdown(None, now), None, "absent resets_at");
+        assert_eq!(
+            countdown(Some(now), now),
+            None,
+            "this instant is not future"
+        );
+        assert_eq!(countdown(Some(now - 1), now), None, "already reset");
+
+        assert_eq!(
+            countdown(Some(now + 86_400), now),
+            Some("1d".into()),
+            "exactly 24h reads as days"
+        );
+        assert_eq!(
+            countdown(Some(now + 86_399), now),
+            Some("23h59m".into()),
+            "one second under 24h still reads as hours"
+        );
+        assert_eq!(countdown(Some(now + 7_800), now), Some("2h10m".into()));
+        assert_eq!(
+            countdown(Some(now + 600), now),
+            Some("10m".into()),
+            "under an hour drops the hours part"
+        );
+        assert_eq!(countdown(Some(now + 3 * 86_400), now), Some("3d".into()));
+    }
+
+    #[test]
+    fn model_segment_omits_absent_parts_and_never_repeats_the_window() {
+        let s = summary();
+
+        let full = payload(
+            r#"{"model":{"display_name":"Opus 5 (1M context)"},
+                "context_window":{"context_window_size":1000000},
+                "effort":{"level":"high"}}"#,
+        );
+        let text = strip_ansi(&render(&input(&full, &s, None, false)));
+        assert!(text.contains("Opus 5 · 1M · high"), "{text}");
+        assert!(
+            !text.contains("1M context"),
+            "the parenthetical is stripped so the window appears once: {text}"
+        );
+
+        let bare = payload(r#"{"model":{"display_name":"Opus 5"}}"#);
+        let text = strip_ansi(&render(&input(&bare, &s, None, false)));
+        assert!(text.contains("Opus 5"), "{text}");
+        assert!(
+            !text.contains(" · "),
+            "no separators with nothing to separate: {text}"
+        );
+    }
+
+    #[test]
+    fn window_sizes_render_compactly() {
+        assert_eq!(format_window(1_000_000), "1M");
+        assert_eq!(format_window(200_000), "200k");
+        assert_eq!(format_window(999), "999");
+        assert_eq!(strip_parenthetical("Opus 5 (1M context)"), "Opus 5");
+        assert_eq!(strip_parenthetical("Opus 5"), "Opus 5");
+    }
+
+    #[test]
+    fn cost_flag_renders_today_as_dollars() {
+        let p = payload(FULL);
+        let s = summary();
+        let mut with_cost = input(&p, &s, Some("main"), false);
+        with_cost.cost = true;
+
+        let text = strip_ansi(&render(&with_cost));
+        assert!(text.contains("today $41.20"), "{text}");
+        assert!(
+            !text.contains("250k"),
+            "dollars replace tokens rather than joining them: {text}"
+        );
     }
 
     #[test]
@@ -359,10 +537,15 @@ mod tests {
         let long = render(&input(&p, &s, Some("main"), false));
         let short = render(&input(&p, &s, Some("main"), true));
 
-        assert!(strip_ansi(&short).len() < strip_ansi(&long).len());
-        assert!(!strip_ansi(&short).contains("Opus 5"));
-        assert!(!strip_ansi(&short).contains("session"));
-        assert!(strip_ansi(&short).contains("38%"));
+        let short = strip_ansi(&short);
+        assert!(short.len() < strip_ansi(&long).len());
+        assert!(!short.contains("Opus 5"), "no model segment: {short}");
+        assert!(!short.contains("5h"), "no rate limits: {short}");
+        assert!(
+            !short.contains('█') && !short.contains('░'),
+            "the bar is dropped but the percentage stays: {short}"
+        );
+        assert!(short.contains("38%"), "{short}");
     }
 
     /// The case that must never panic: Claude Code sent us almost nothing.
