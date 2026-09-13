@@ -42,9 +42,9 @@ macOS architectures, each with a SHA256 alongside it.
 TARGET=x86_64-unknown-linux-musl
 VERSION=v0.1.1
 BASE=https://github.com/hmedkouri/cc-ledger/releases/download/$VERSION
-curl -LO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz
-curl -LO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz.sha256
-sha256sum -c cc-ledger-$VERSION-$TARGET.tar.gz.sha256   # shasum -a 256 -c on macOS
+curl -fLO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz
+curl -fLO $BASE/cc-ledger-$VERSION-$TARGET.sha256
+sha256sum -c cc-ledger-$VERSION-$TARGET.sha256   # shasum -a 256 -c on macOS
 tar xzf cc-ledger-$VERSION-$TARGET.tar.gz
 mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
 ```
