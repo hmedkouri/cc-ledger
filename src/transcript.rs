@@ -14,8 +14,19 @@
 
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+
+/// Longest line worth buffering. A record still being written — a large
+/// attachment, say — would otherwise be read into memory in full on every
+/// pass, only to be discarded because it has no newline yet. Over-length lines
+/// are consumed and counted, never parsed.
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much of a file's head is hashed to detect replacement. An inode can be
+/// reused after delete-and-recreate; the offset alone would then resume into
+/// the middle of an unrelated file and skip its beginning permanently.
+const HEAD_HASH_BYTES: usize = 4096;
 
 /// Where a request came from. Subagent records have never been observed on
 /// disk (see `Source::from_sidechain` and `discover`), but the flag is cheap to
@@ -120,6 +131,14 @@ pub struct Cursor {
     pub byte_offset: u64,
     /// Inode on unix. Used to notice the file was replaced rather than appended.
     pub file_id: u64,
+    /// Hash of the file's first [`HEAD_HASH_BYTES`] bytes. An inode can be
+    /// reused, so a delete-and-recreate that lands on the same number would
+    /// otherwise resume mid-file and skip the new file's head — the one cursor
+    /// failure that loses rows instead of merely re-reading them.
+    ///
+    /// Zero means "unknown", as written by a version before this existed; such
+    /// a cursor is honoured rather than forcing a needless full re-read.
+    pub head_hash: u64,
 }
 
 #[derive(Debug)]
@@ -328,16 +347,24 @@ pub fn scan_batch(
     cursor: Option<Cursor>,
     max_lines: Option<usize>,
 ) -> std::io::Result<Scan> {
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
     let meta = file.metadata()?;
     let file_id = file_id(&meta);
     let len = meta.len();
+    let head_hash = head_hash(&mut file, len)?;
 
-    // Rotation or truncation: the file we were reading is not this file, or it
-    // got shorter. Either way the stored offset is meaningless — start over.
-    // Re-ingesting is harmless because the dedupe key is stable.
+    // Rotation, truncation or reuse: the file we were reading is not this file,
+    // it got shorter, or its head changed under a recycled inode. Either way
+    // the stored offset is meaningless — start over. Re-ingesting is harmless
+    // because the dedupe key is stable.
     let (start, restarted) = match cursor {
-        Some(c) if c.file_id == file_id && c.byte_offset <= len => (c.byte_offset, false),
+        Some(c)
+            if c.file_id == file_id
+                && c.byte_offset <= len
+                && (c.head_hash == 0 || c.head_hash == head_hash) =>
+        {
+            (c.byte_offset, false)
+        }
         Some(_) => (0, true),
         None => (0, false),
     };
@@ -364,12 +391,27 @@ pub fn scan_batch(
         }
 
         buf.clear();
-        let n = reader.read_until(b'\n', &mut buf)?;
+        let n = (&mut reader)
+            .take(MAX_LINE_BYTES as u64)
+            .read_until(b'\n', &mut buf)?;
         if n == 0 {
             break;
         }
         if buf.last() != Some(&b'\n') {
-            // Partial line at EOF — a live session mid-write. Leave it.
+            if n == MAX_LINE_BYTES {
+                // Over-length. Consume the remainder so the cursor can move
+                // past it — capping the buffer without draining would stall
+                // the reader on this line forever — but never parse it.
+                let mut rest = Vec::new();
+                let extra = reader.read_until(b'\n', &mut rest)?;
+                if rest.last() == Some(&b'\n') {
+                    offset += (n + extra) as u64;
+                    lines += 1;
+                    malformed += 1;
+                    continue;
+                }
+            }
+            // Ordinary partial line at EOF — a live session mid-write. Leave it.
             break;
         }
         offset += n as u64;
@@ -399,12 +441,42 @@ pub fn scan_batch(
         cursor: Cursor {
             byte_offset: offset,
             file_id,
+            head_hash,
         },
         malformed,
         dropped,
         restarted,
         exhausted,
     })
+}
+
+/// Hash the file's **first line**, leaving the handle rewound to the start.
+///
+/// The first line never changes once written, so this is stable under append.
+/// Hashing a fixed-size prefix instead is not: for a file shorter than the
+/// window the hashed region grows with the file, so every append to a young
+/// transcript looks like a replacement and restarts the scan from zero — on
+/// every render, for exactly the sessions that are still being written.
+///
+/// Returns 0, meaning "unknown", when no newline falls within the cap. A file
+/// whose first line is still mid-write is then honoured rather than restarted,
+/// as are cursors written before this existed.
+fn head_hash(file: &mut File, len: u64) -> std::io::Result<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let want = HEAD_HASH_BYTES.min(len as usize);
+    let mut head = vec![0u8; want];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut head)?;
+
+    let Some(newline) = head.iter().position(|&b| b == b'\n') else {
+        return Ok(0);
+    };
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    head[..=newline].hash(&mut hasher);
+    // Reserve zero for "unknown" so a real hash is never mistaken for one.
+    Ok(hasher.finish() | 1)
 }
 
 #[cfg(unix)]
@@ -689,6 +761,7 @@ mod tests {
         let stale = Cursor {
             byte_offset: first.cursor.byte_offset,
             file_id: first.cursor.file_id,
+            head_hash: first.cursor.head_hash,
         };
         let second = scan(&path, Some(stale)).unwrap();
         assert!(second.restarted, "shrunk file must restart from zero");
@@ -709,10 +782,145 @@ mod tests {
         let bogus = Cursor {
             byte_offset: 0,
             file_id: first.cursor.file_id.wrapping_add(1),
+            head_hash: first.cursor.head_hash,
         };
         let second = scan(&path, Some(bogus)).unwrap();
         assert!(second.restarted, "different inode must restart");
         assert_eq!(second.records.len(), first.records.len());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An inode is reusable: delete and recreate can land on the same number.
+    /// Offset and inode would then both look valid while pointing into the
+    /// middle of an unrelated file, permanently skipping its head — the one
+    /// cursor failure that loses rows rather than merely re-reading them.
+    #[test]
+    fn restarts_when_the_file_head_changes_under_the_same_inode() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-reuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+
+        let original = "{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T15:00:00.000Z\",\"message\":{\"id\":\"msg_FIRST\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let first = scan(&path, None).unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert_ne!(first.cursor.head_hash, 0, "a real hash is never zero");
+
+        // Rewrite in place: same path, same inode, but longer — so both the
+        // inode check and the `offset <= len` check still pass. Only the head
+        // has changed. Without hashing, the scan would resume at the old offset
+        // and never see msg_NEW_A.
+        let replacement = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T16:00:00.000Z\",\"message\":{\"id\":\"msg_NEW_A\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T16:00:01.000Z\",\"message\":{\"id\":\"msg_NEW_B\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n",
+        );
+        std::fs::write(&path, replacement).unwrap();
+
+        let second = scan(&path, Some(first.cursor)).unwrap();
+        assert!(second.restarted, "a changed head must force a restart");
+        assert_eq!(
+            second.records.len(),
+            2,
+            "the replacement file's head must not be skipped"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Appending to a young transcript must resume, not restart.
+    ///
+    /// Regression: hashing a fixed-size prefix rather than the first line made
+    /// the hashed region grow with any file shorter than the window, so every
+    /// append looked like a replacement. Live sessions append constantly, so
+    /// this would have re-read them from zero on every render.
+    #[test]
+    fn appending_to_a_small_file_does_not_restart() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-grow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+
+        let line = |id: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T15:00:00.000Z\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-opus-5\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":2}}}}}}\n"
+            )
+        };
+
+        std::fs::write(&path, line("msg_A")).unwrap();
+        let first = scan(&path, None).unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert_ne!(first.cursor.head_hash, 0, "a complete first line hashes");
+
+        // The file is far shorter than HEAD_HASH_BYTES, which is the case that
+        // previously broke.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(line("msg_B").as_bytes()).unwrap();
+        drop(f);
+
+        let second = scan(&path, Some(first.cursor)).unwrap();
+        assert!(!second.restarted, "an append must resume, not restart");
+        assert_eq!(second.records.len(), 1, "only the appended record");
+        assert_eq!(second.records[0].dedupe_key, "msg_B");
+        assert_eq!(
+            second.cursor.head_hash, first.cursor.head_hash,
+            "the first line did not change, so neither should its hash"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cursors written before head hashing existed store zero. They must be
+    /// honoured, not treated as a mismatch forcing a pointless full re-read.
+    #[test]
+    fn an_unknown_head_hash_is_honoured() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::copy(fixture(), &path).unwrap();
+
+        let first = scan(&path, None).unwrap();
+        let legacy = Cursor {
+            head_hash: 0,
+            ..first.cursor
+        };
+
+        let second = scan(&path, Some(legacy)).unwrap();
+        assert!(!second.restarted, "a pre-hash cursor should still resume");
+        assert!(second.records.is_empty(), "nothing new to read");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A line past the cap is consumed and counted but never parsed, and must
+    /// not stall the reader: capping the buffer without draining the line would
+    /// leave the cursor stuck before it forever.
+    #[test]
+    fn an_over_long_line_is_skipped_without_stalling() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-longline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+
+        let mut content = String::with_capacity(MAX_LINE_BYTES + 4096);
+        content.push_str("{\"type\":\"assistant\",\"pad\":\"");
+        content.push_str(&"x".repeat(MAX_LINE_BYTES + 16));
+        content.push_str("\"}\n");
+        content.push_str("{\"type\":\"assistant\",\"timestamp\":\"2026-09-05T15:00:00.000Z\",\"message\":{\"id\":\"msg_AFTER\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n");
+        std::fs::write(&path, &content).unwrap();
+
+        let scanned = scan(&path, None).unwrap();
+
+        assert_eq!(scanned.malformed, 1, "counted, not parsed");
+        assert_eq!(scanned.records.len(), 1, "the record after it is found");
+        assert_eq!(scanned.records[0].dedupe_key, "msg_AFTER");
+        assert_eq!(
+            scanned.cursor.byte_offset,
+            content.len() as u64,
+            "the cursor moved past the over-long line"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

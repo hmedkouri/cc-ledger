@@ -309,7 +309,9 @@ impl Ledger {
                 transcript_path TEXT PRIMARY KEY,
                 byte_offset     INTEGER NOT NULL,
                 file_id         INTEGER NOT NULL,
-                last_seen       INTEGER NOT NULL
+                last_seen       INTEGER NOT NULL,
+                -- Added after the first release; 0 means "unknown".
+                head_hash       INTEGER NOT NULL DEFAULT 0
             );
 
             -- Claude Code's own cumulative accounting, one row per session,
@@ -354,14 +356,24 @@ impl Ledger {
         // explicitly or every existing ledger fails at insert time with "no
         // such column". Checking first makes this idempotent and keeps startup
         // free of expected-and-ignored errors.
-        for (column, ddl) in [
-            ("speed", "ALTER TABLE requests ADD COLUMN speed TEXT"),
+        for (table, column, ddl) in [
             (
+                "requests",
+                "speed",
+                "ALTER TABLE requests ADD COLUMN speed TEXT",
+            ),
+            (
+                "requests",
                 "inference_geo",
                 "ALTER TABLE requests ADD COLUMN inference_geo TEXT",
             ),
+            (
+                "cursors",
+                "head_hash",
+                "ALTER TABLE cursors ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0",
+            ),
         ] {
-            if !self.has_column("requests", column)? {
+            if !self.has_column(table, column)? {
                 self.conn.execute(ddl, [])?;
             }
         }
@@ -412,17 +424,20 @@ impl Ledger {
         let inserted = insert_records(&tx, &scan.records)?;
         insert_cost_states(&tx, &scan.cost_states, now)?;
         tx.execute(
-            "INSERT INTO cursors (transcript_path, byte_offset, file_id, last_seen)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO cursors
+             (transcript_path, byte_offset, file_id, last_seen, head_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(transcript_path) DO UPDATE SET
                byte_offset = excluded.byte_offset,
                file_id     = excluded.file_id,
-               last_seen   = excluded.last_seen",
+               last_seen   = excluded.last_seen,
+               head_hash   = excluded.head_hash",
             rusqlite::params![
                 transcript_path,
                 cursor.byte_offset as i64,
                 cursor.file_id as i64,
-                now
+                now,
+                cursor.head_hash as i64,
             ],
         )?;
         tx.commit()?;
@@ -433,12 +448,14 @@ impl Ledger {
         let found = self
             .conn
             .query_row(
-                "SELECT byte_offset, file_id FROM cursors WHERE transcript_path = ?1",
+                "SELECT byte_offset, file_id, head_hash FROM cursors
+                 WHERE transcript_path = ?1",
                 [transcript_path],
                 |row| {
                     Ok(Cursor {
                         byte_offset: row.get::<_, i64>(0)? as u64,
                         file_id: row.get::<_, i64>(1)? as u64,
+                        head_hash: row.get::<_, i64>(2)? as u64,
                     })
                 },
             )
@@ -448,17 +465,20 @@ impl Ledger {
 
     pub fn set_cursor(&self, transcript_path: &str, cursor: Cursor, now: i64) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO cursors (transcript_path, byte_offset, file_id, last_seen)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO cursors
+             (transcript_path, byte_offset, file_id, last_seen, head_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(transcript_path) DO UPDATE SET
                byte_offset = excluded.byte_offset,
                file_id     = excluded.file_id,
-               last_seen   = excluded.last_seen",
+               last_seen   = excluded.last_seen,
+               head_hash   = excluded.head_hash",
             rusqlite::params![
                 transcript_path,
                 cursor.byte_offset as i64,
                 cursor.file_id as i64,
-                now
+                now,
+                cursor.head_hash as i64,
             ],
         )?;
         Ok(())
@@ -775,13 +795,19 @@ mod tests {
         let c = Cursor {
             byte_offset: 4096,
             file_id: 77,
+            head_hash: 0xDEAD_BEEF,
         };
         l.set_cursor("/t.jsonl", c, 1_000).unwrap();
-        assert_eq!(l.cursor("/t.jsonl").unwrap(), Some(c));
+        assert_eq!(
+            l.cursor("/t.jsonl").unwrap(),
+            Some(c),
+            "head_hash must survive the round trip, or every resume restarts"
+        );
 
         let c2 = Cursor {
             byte_offset: 8192,
             file_id: 77,
+            head_hash: 0xDEAD_BEEF,
         };
         l.set_cursor("/t.jsonl", c2, 2_000).unwrap();
         assert_eq!(l.cursor("/t.jsonl").unwrap(), Some(c2));

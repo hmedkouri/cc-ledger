@@ -89,6 +89,11 @@ cc-usage --version
 Timestamps are stored as UTC and bucketed in **local** time, so a day is 23 or
 25 hours long across a DST transition rather than a flat 86 400 seconds.
 
+Bucketing uses the timezone in force when you *query*, not when the request was
+made. Totals are therefore stable for anyone who stays in one zone, but the same
+ledger queried from a different `TZ` will move requests near midnight into
+adjacent days. Only the bucket boundaries shift; the stored timestamps never do.
+
 ### The status line
 
 ```
@@ -129,6 +134,20 @@ Rates live in `src/pricing.rs`, verified against the published pricing page on
 2026-09-13. An unknown model id is reported as *unpriced* rather than counted as
 free, so a model introduced by a future Claude Code release cannot silently
 shrink the total.
+
+**What the estimate assumes.** Standard speed — fast mode doubles Opus rates;
+globally routed inference — pinning to `us` adds 10% to every token class; and
+no server-tool charges, such as web search at $10 per 1 000 requests. The
+`speed` and `inference_geo` fields *are* recorded per request, so the figures
+can be corrected later, but none of the three is priced today. No traffic in the
+development ledger used any of them.
+
+**How complete the underlying counts are.** `summary` prints a coverage line:
+the share of Claude Code's own token count that the per-request rows account
+for. It sits slightly below 100% by design, because Claude Code bills requests
+that never produce a transcript record — retries, aborted turns, and auxiliary
+calls to models that appear nowhere in the transcript. On the development ledger
+that share is 90.3%.
 
 Separately, the status line records `rate_limits.five_hour` and `seven_day` from
 Claude Code's payload into a `limits` table. On a subscription that is the live

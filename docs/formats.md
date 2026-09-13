@@ -328,6 +328,29 @@ These are **cumulative session snapshots**, re-emitted periodically — the last
 one per `sessionId` is the most current. They are Claude Code's own accounting,
 they carry the `[1m]` variant name, and they include a real `costUSD`.
 
+**They are captured.** `cost_state` holds one row per session, superseded by
+each later snapshot and written in the same transaction as the requests and the
+cursor. They are pruned along with the transcripts that carry them, so a
+snapshot not stored now is unrecoverable later — the same argument as the
+rate-limit history.
+
+The point of storing them is to state an error bar rather than leave the reader
+trusting a figure known to run low. `cc-usage summary` reports what fraction of
+Claude Code's own token count the per-request rows account for. Measured across
+the 16 sessions that have a snapshot: **90.3%** — a wider gap than per-session
+sampling suggested, closer to a tenth than to "a few percent".
+
+The stored `models` column is direct evidence of where the missing tenth goes.
+It records ids exactly as Claude Code names them, so a real session reads:
+
+```
+claude-haiku-4-5-20251001,claude-opus-5,claude-opus-5[1m]
+```
+
+Haiku appears in Claude Code's accounting for several sessions while **no
+`assistant` record anywhere on disk carries it at all**. Those auxiliary calls
+are invisible to per-request parsing by construction, not by oversight.
+
 **They are not a reliable equality oracle.** Reconciling our deduped per-request
 sums against the final `cost-state` across all 12 sessions that have one:
 
