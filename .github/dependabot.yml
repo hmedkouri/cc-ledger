@@ -1,0 +1,19 @@
+version: 2
+
+updates:
+  # The dependency tree is deliberately small and has nothing network-facing in
+  # it. Weekly PRs keep it that way visibly, rather than by assumption.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore"
