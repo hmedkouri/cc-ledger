@@ -29,7 +29,7 @@ activity cache showed usage stretching back nine months.
 }
 ```
 
-Then build and install. Needs a Rust toolchain (1.85+); SQLite is bundled, so
+Then build and install. Needs a Rust toolchain (1.87+); SQLite is bundled, so
 there is nothing else to install.
 
 ```sh
@@ -49,6 +49,16 @@ location with `make install BIN_DIR=... LINK_DIR=...`.
 `make install` never edits `settings.json`. It prints the exact diff and stops;
 `statusline-apply` writes it, preserving every other key and keeping a timestamped
 backup. macOS code-signing is applied automatically and skipped elsewhere.
+
+`make uninstall` reverses all of it: both binaries and the symlink are removed,
+and the `statusLine` key is restored from the most recent backup — only that key,
+so anything else you changed since survives. Your ledger database is left alone.
+
+If you only want the `cc-usage` query tool and would rather skip the Makefile:
+
+```sh
+cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.0 --bin cc-usage
+```
 
 ## The status line
 
