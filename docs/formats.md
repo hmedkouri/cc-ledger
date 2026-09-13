@@ -51,6 +51,19 @@ questions about the period since it started recording.
   `/home/user/projects/Example` → `-home-user-projects-Example`).
   Lossy: a real `-` in a path is indistinguishable from a separator. **Use the
   `cwd` field inside the records, never the directory name.** [verified]
+- **`cwd` is recorded per record, and it moves mid-session.** Claude Code
+  rewrites it when the working directory changes, so one session's records can
+  carry several different paths. On the machine this was written against, 5 of
+  19 sessions did so, turning 19 transcripts into 22 distinct `cwd` values. One
+  session alone reported `…/example` (1098 records), `…/example/www` (19) and
+  `…/example/www/includes` (1) — while all of its records live in the single
+  project slug directory for `…/example`. [verified]
+
+  Consequence: `cwd` answers "where did this request run", not "which project
+  does it belong to". A per-project breakdown keyed on `cwd` splits one project
+  across every subdirectory a session happened to visit. Use the directory the
+  **session started in** instead — `sessions.project_dir` in the ledger,
+  surfaced as `Row::project_root`, with `cwd` preserved alongside it.
 - Filename stem = `sessionId`; every record in a file carries that same
   `sessionId`. [verified, 5 files sampled]
 - All 19 files end with a trailing newline (`0x0a`). The last line is still

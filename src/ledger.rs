@@ -34,7 +34,14 @@ pub struct LedgerSummary {
 pub struct Row {
     pub ts: i64,
     pub model: String,
+    /// The cwd recorded on *this individual request*. Claude Code updates it
+    /// mid-session when the working directory moves, so grouping by it splits
+    /// one project across every subdirectory a session happened to visit.
     pub project_dir: String,
+    /// The directory the *session* started in — the project Claude Code
+    /// considers the work to belong to, and the right key for a per-project
+    /// breakdown. Falls back to `project_dir` when the session is unknown.
+    pub project_root: String,
     pub input: i64,
     pub output: i64,
     pub cache_create: i64,
@@ -338,11 +345,13 @@ impl Ledger {
     /// Rows in `[since, until)`, ordered by time, for `cc-usage` to bucket.
     pub fn rows(&self, since: Option<i64>, until: Option<i64>) -> Result<Vec<Row>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, coalesce(model,'unknown'), coalesce(project_dir,'unknown'),
-                    input, output, cache_create, cache_read, cache_1h, cache_5m
-             FROM requests
-             WHERE ts >= ?1 AND ts < ?2
-             ORDER BY ts",
+            "SELECT r.ts, coalesce(r.model,'unknown'), coalesce(r.project_dir,'unknown'),
+                    coalesce(s.project_dir, r.project_dir, 'unknown') AS project_root,
+                    r.input, r.output, r.cache_create, r.cache_read, r.cache_1h, r.cache_5m
+             FROM requests r
+             LEFT JOIN sessions s ON s.session_id = r.session_id
+             WHERE r.ts >= ?1 AND r.ts < ?2
+             ORDER BY r.ts",
         )?;
         let rows = stmt
             .query_map(
@@ -352,12 +361,13 @@ impl Ledger {
                         ts: row.get(0)?,
                         model: row.get(1)?,
                         project_dir: row.get(2)?,
-                        input: row.get(3)?,
-                        output: row.get(4)?,
-                        cache_create: row.get(5)?,
-                        cache_read: row.get(6)?,
-                        cache_1h: row.get(7)?,
-                        cache_5m: row.get(8)?,
+                        project_root: row.get(3)?,
+                        input: row.get(4)?,
+                        output: row.get(5)?,
+                        cache_create: row.get(6)?,
+                        cache_read: row.get(7)?,
+                        cache_1h: row.get(8)?,
+                        cache_5m: row.get(9)?,
                     })
                 },
             )?
@@ -585,6 +595,55 @@ mod tests {
             "same session across two transcripts shows up"
         );
         assert_eq!(dupes[0].1, 2);
+    }
+
+    /// Claude Code rewrites `cwd` mid-session when the working directory moves,
+    /// so grouping by it scatters one project across every subdirectory the
+    /// session visited. `project_root` must report where the session started.
+    #[test]
+    fn project_root_follows_the_session_not_the_request_cwd() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        let mut root = record("a", 1_000, 10);
+        root.project_dir = Some("/proj".into());
+        let mut sub = record("b", 2_000, 10);
+        sub.project_dir = Some("/proj/www".into());
+        let mut deeper = record("c", 3_000, 10);
+        deeper.project_dir = Some("/proj/www/includes".into());
+
+        l.ingest(&[root, sub, deeper]).unwrap();
+
+        let rows = l.rows(None, None).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.project_dir.as_str())
+                .collect::<Vec<_>>(),
+            ["/proj", "/proj/www", "/proj/www/includes"],
+            "the per-request cwd is preserved, not overwritten"
+        );
+        assert!(
+            rows.iter().all(|r| r.project_root == "/proj"),
+            "every row rolls up to the directory the session started in"
+        );
+    }
+
+    /// A request whose session was never recorded must still be attributable.
+    #[test]
+    fn project_root_falls_back_to_the_request_cwd() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        let mut orphan = record("a", 1_000, 10);
+        orphan.session_id = None;
+        orphan.project_dir = Some("/lonely".into());
+
+        l.ingest(&[orphan]).unwrap();
+
+        let rows = l.rows(None, None).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a sessionless row is not dropped by the join"
+        );
+        assert_eq!(rows[0].project_root, "/lonely");
     }
 
     #[test]

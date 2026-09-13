@@ -225,7 +225,7 @@ fn summary(range: Range, cost: bool) -> Result<()> {
         totals.add(row);
         by_model.entry(row.model.clone()).or_default().add(row);
         by_project
-            .entry(row.project_dir.clone())
+            .entry(row.project_root.clone())
             .or_default()
             .add(row);
     }
@@ -270,7 +270,7 @@ fn breakdown(range: Range, by: Option<GroupBy>, period: Period, cost: bool) -> R
     for row in &rows {
         let key = match by {
             Some(GroupBy::Model) => row.model.clone(),
-            Some(GroupBy::Project) => shorten(&row.project_dir),
+            Some(GroupBy::Project) => shorten(&row.project_root),
             None => String::new(),
         };
         buckets
@@ -403,14 +403,17 @@ fn export(format: Format, range: Range) -> Result<()> {
 
     match format {
         Format::Csv => {
-            println!("timestamp,model,project_dir,input,output,cache_create,cache_read,total");
+            println!(
+                "timestamp,model,project_root,project_dir,input,output,cache_create,cache_read,total"
+            );
             for r in &rows {
                 println!(
-                    "{},{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{}",
                     chrono::DateTime::from_timestamp(r.ts, 0)
                         .unwrap_or_default()
                         .to_rfc3339(),
                     csv_escape(&r.model),
+                    csv_escape(&r.project_root),
                     csv_escape(&r.project_dir),
                     r.input,
                     r.output,
@@ -428,6 +431,7 @@ fn export(format: Format, range: Range) -> Result<()> {
                         "timestamp": chrono::DateTime::from_timestamp(r.ts, 0)
                             .unwrap_or_default().to_rfc3339(),
                         "model": r.model,
+                        "project_root": r.project_root,
                         "project_dir": r.project_dir,
                         "input": r.input,
                         "output": r.output,
@@ -585,6 +589,7 @@ mod tests {
             ts: 0,
             model: "m".into(),
             project_dir: "/p".into(),
+            project_root: "/p".into(),
             input: 1,
             output: 2,
             cache_create: 4,
@@ -604,6 +609,7 @@ mod tests {
             ts: 0,
             model: model.into(),
             project_dir: "/p".into(),
+            project_root: "/p".into(),
             input: 0,
             output: 0,
             cache_create: 0,
