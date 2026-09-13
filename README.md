@@ -195,10 +195,12 @@ bill or auditing against an invoice.
 ## Performance
 
 A cold render is budgeted under 20 ms in release on Linux, asserted in
-`tests/timing.rs`. That test measures a whole process invocation, so macOS uses a
-looser bound: the GitHub macOS runner spent 70 ms just spawning the binary while
-running the in-process work faster than Linux did, which makes the figure there a
-statement about process startup rather than about this crate.
+`tests/timing.rs`. That test measures a whole process invocation, and on macOS
+the spawn dominates it and varies far too widely to bound — three CI samples of
+one build gave 70 ms, 77 ms and 156 ms — so the assertion is skipped there rather
+than loosened into meaninglessness. The work this crate actually does is guarded
+in-process instead, and the macOS runner completes those checks faster than the
+Linux one.
 The status line itself spawns no subprocess of any kind: the branch comes from
 reading `.git/HEAD`
 directly, and there is no network-facing dependency in the crate. For scale, the

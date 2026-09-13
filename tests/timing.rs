@@ -19,21 +19,13 @@ use cc_ledger::transcript;
 
 const RELEASE_BUILD: bool = !cfg!(debug_assertions);
 
-/// Cold status-line invocation with nothing to ingest.
-///
-/// This is the only timing test that spawns a process, and on macOS the spawn
-/// dominates it. Measured on the GitHub macOS runner against the same commit:
-/// 70 ms here, while the in-process batch test ran *faster* than Linux (4.2 ms
-/// against 5.3 ms). A 20 ms bound there would be asserting something about dyld
-/// and code-signature validation rather than about this crate, so macOS gets a
-/// looser budget that still catches a real regression.
+/// Cold status-line invocation with nothing to ingest. Linux only; see the note
+/// on [`cold_statusline_renders_within_budget`].
 fn render_budget() -> Duration {
-    if !RELEASE_BUILD {
-        Duration::from_millis(250)
-    } else if cfg!(target_os = "macos") {
-        Duration::from_millis(150)
-    } else {
+    if RELEASE_BUILD {
         Duration::from_millis(20)
+    } else {
+        Duration::from_millis(250)
     }
 }
 
@@ -73,8 +65,24 @@ fn synth_line(index: usize) -> String {
     )
 }
 
+/// Not asserted on macOS: this is the only timing test that spawns a process,
+/// and there the spawn dominates and varies too widely to bound. Three GitHub
+/// macOS runner samples of the same build measured 70 ms, 77 ms and 156 ms,
+/// against 2.5-3 ms on Linux. A 150 ms budget was tried and the third sample
+/// exceeded it, so any figure that would not flake is too loose to catch a
+/// regression.
+///
+/// Nothing is lost by skipping it. What this guards — the cost of the render
+/// work itself — is covered in-process by the two tests below, which the macOS
+/// runner completes faster than Linux does, and tests/statusline.rs still runs
+/// the real binary end-to-end on macOS for correctness.
 #[test]
 fn cold_statusline_renders_within_budget() {
+    if cfg!(target_os = "macos") {
+        println!("skipped on macOS: measures process spawn, not rendering");
+        return;
+    }
+
     let dir = temp_dir("render");
     let db = dir.join("ledger.db");
 
