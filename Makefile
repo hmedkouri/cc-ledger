@@ -1,4 +1,7 @@
 BIN_DIR ?= $(HOME)/.claude/bin
+# cc-usage is typed by hand, so it needs to be on PATH. statusline never is -
+# Claude Code invokes it by the absolute path stored in settings.json.
+LINK_DIR ?= $(HOME)/.local/bin
 SETTINGS ?= $(HOME)/.claude/settings.json
 UNAME := $(shell uname -s)
 
@@ -28,6 +31,13 @@ install-bins: build
 	@install -m 0755 target/release/statusline "$(BIN_DIR)/statusline"
 	@install -m 0755 target/release/cc-usage  "$(BIN_DIR)/cc-usage"
 	@echo "Installed statusline and cc-usage to $(BIN_DIR)"
+	@mkdir -p "$(LINK_DIR)"
+	@ln -sf "$(BIN_DIR)/cc-usage" "$(LINK_DIR)/cc-usage"
+	@echo "Linked cc-usage into $(LINK_DIR)"
+	@case ":$$PATH:" in \
+		*":$(LINK_DIR):"*) ;; \
+		*) echo "WARNING: $(LINK_DIR) is not on your PATH - add it, or run cc-usage as $(BIN_DIR)/cc-usage" ;; \
+	esac
 ifeq ($(UNAME),Darwin)
 	@echo "Signing for macOS Gatekeeper"
 	@codesign --force --sign - "$(BIN_DIR)/statusline" 2>/dev/null || \

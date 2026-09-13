@@ -22,6 +22,12 @@ make statusline-apply # only this touches settings.json, and keeps a backup
 cc-usage backfill     # read every transcript currently on disk
 ```
 
+Both binaries are installed to `~/.claude/bin`. `statusline` is never typed —
+Claude Code runs it via the absolute path written into `settings.json` — so only
+`cc-usage` needs to be on your `PATH`, and `make install` symlinks it into
+`~/.local/bin`, warning if that directory is not on your `PATH`. Override either
+location with `make install BIN_DIR=... LINK_DIR=...`.
+
 `make install` never edits `settings.json`. It prints the exact diff and stops;
 `statusline-apply` writes it, preserving every other key and keeping a timestamped
 backup. macOS code-signing is applied automatically and skipped elsewhere.
