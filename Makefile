@@ -5,16 +5,39 @@ LINK_DIR ?= $(HOME)/.local/bin
 SETTINGS ?= $(HOME)/.claude/settings.json
 UNAME := $(shell uname -s)
 
-.PHONY: all build test lint install install-bins statusline-diff statusline-apply uninstall backfill clean
+.PHONY: all build test lint help install install-bins statusline-diff statusline-apply uninstall backfill clean
 
 all: lint test
 
+## List these targets and the options worth knowing.
+help:
+	@echo "cc-ledger targets:"
+	@awk 'BEGIN {FS = ":"} \
+		/^## / { doc = doc substr($$0, 4) " "; next } \
+		/^[a-z][a-z-]*:/ { if (doc) { sub(/ $$/, "", doc); printf "  %-17s %s\n", $$1, doc; doc = "" } } \
+		{ if ($$0 !~ /^## /) doc = "" }' $(MAKEFILE_LIST)
+	@echo
+	@echo "Notes:"
+	@echo "  statusline is never typed - Claude Code runs it by the absolute path in"
+	@echo "  settings.json - so only cc-usage needs to be on PATH. install symlinks it"
+	@echo "  into $(LINK_DIR) and warns if that is not on your PATH."
+	@echo
+	@echo "  install prints the settings.json diff and stops. Only statusline-apply"
+	@echo "  writes, preserving every other key and keeping a timestamped backup."
+	@echo
+	@echo "  On macOS both binaries are ad-hoc code-signed; skipped elsewhere."
+	@echo "  Override locations: make install BIN_DIR=... LINK_DIR=..."
+	@echo "  Current: BIN_DIR=$(BIN_DIR) LINK_DIR=$(LINK_DIR)"
+
+## Build both binaries in release mode.
 build:
 	cargo build --release
 
+## Run the test suite.
 test:
 	cargo test
 
+## Check formatting and run clippy with warnings denied.
 lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings

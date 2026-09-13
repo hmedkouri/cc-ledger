@@ -546,9 +546,9 @@ These findings drove the following decisions.
 
 1. **A backfill recovers only what has not yet been pruned.** Per-request token
    history older than the retention window does not exist on disk in any form,
-   so the ledger is forward-looking by nature. Raising `cleanupPeriodDays` keeps
-   the raw transcripts as a second, independent record and costs nothing but
-   disk.
+   so the ledger is forward-looking by nature. Once a transcript has been
+   ingested the ledger no longer needs it; raising `cleanupPeriodDays` to 90–180
+   only buys the ability to re-ingest after a parser fix.
 2. **Cost is estimated from a built-in price table.** `message.model` drops the
    `[1m]` suffix, but that suffix denotes the configured context window, not a
    price tier: long context bills at standard rates (§2.6), so the bare model id

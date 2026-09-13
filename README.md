@@ -18,78 +18,38 @@ Two binaries:
 
 ## Install
 
-**Step 0: raise `cleanupPeriodDays` first.** The backfill can only import
-transcripts that have not already been pruned, and those raw transcripts stay
-your only independent record if the parser is ever wrong. On the development
-machine the surviving transcripts reached back 11 days while Claude Code's own
-activity cache showed usage stretching back nine months.
-
-```jsonc
-// ~/.claude/settings.json
-{
-  "cleanupPeriodDays": 3650
-}
-```
-
-### Prebuilt binaries
-
-No Rust toolchain needed. Every release carries static Linux builds and both
-macOS architectures, each with a SHA256 alongside it.
+### Prebuilt
 
 ```sh
-# x86_64-unknown-linux-musl, aarch64-unknown-linux-musl,
-# aarch64-apple-darwin or x86_64-apple-darwin
+# x86_64-unknown-linux-musl · aarch64-unknown-linux-musl · aarch64-apple-darwin · x86_64-apple-darwin
 TARGET=x86_64-unknown-linux-musl
 VERSION=v0.1.1
 BASE=https://github.com/hmedkouri/cc-ledger/releases/download/$VERSION
-curl -fLO $BASE/cc-ledger-$VERSION-$TARGET.tar.gz
-curl -fLO $BASE/cc-ledger-$VERSION-$TARGET.sha256
-sha256sum -c cc-ledger-$VERSION-$TARGET.sha256   # shasum -a 256 -c on macOS
-tar xzf cc-ledger-$VERSION-$TARGET.tar.gz
+curl -fL -O $BASE/cc-ledger-$VERSION-$TARGET.tar.gz -O $BASE/cc-ledger-$VERSION-$TARGET.sha256
+sha256sum -c cc-ledger-$VERSION-$TARGET.sha256 && tar xzf cc-ledger-$VERSION-$TARGET.tar.gz  # shasum -a 256 -c on macOS
 mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
+# macOS: xattr -d com.apple.quarantine ~/.claude/bin/statusline ~/.claude/bin/cc-usage
 ```
 
-The Linux archives are statically linked against musl, so they do not impose a
-minimum glibc version on your distribution. On macOS, a downloaded binary is
-quarantined by Gatekeeper — clear it with
-`xattr -d com.apple.quarantine ~/.claude/bin/statusline ~/.claude/bin/cc-usage`.
-
-Claude Code still has to be pointed at the status line. Clone the repository and
-run `make statusline-apply`, or add the `statusLine` key to
-`~/.claude/settings.json` yourself, giving the absolute path to the binary.
+Point Claude Code at it by adding
+`"statusLine": {"type": "command", "command": "/home/you/.claude/bin/statusline"}`
+to `~/.claude/settings.json` — the path must be absolute — or clone and run
+`make statusline-apply`, which writes it for you.
 
 ### From source
 
-Needs a Rust toolchain (1.87+); SQLite is bundled, so there is nothing else to
-install.
+Rust 1.87+; SQLite is bundled.
 
 ```sh
-git clone https://github.com/hmedkouri/cc-ledger.git
-cd cc-ledger
-make install          # builds, installs to ~/.claude/bin, prints the settings diff
-make statusline-apply # only this touches settings.json, and keeps a backup
-cc-usage backfill     # read every transcript currently on disk
+git clone https://github.com/hmedkouri/cc-ledger.git && cd cc-ledger
+make install          # → ~/.claude/bin, and symlinks cc-usage into ~/.local/bin (statusline is never typed, so only cc-usage needs PATH); prints the settings diff without applying it
+make statusline-apply # the only step that edits settings.json; keeps a timestamped backup
 ```
 
-Both binaries are installed to `~/.claude/bin`. `statusline` is never typed —
-Claude Code runs it via the absolute path written into `settings.json` — so only
-`cc-usage` needs to be on your `PATH`, and `make install` symlinks it into
-`~/.local/bin`, warning if that directory is not on your `PATH`. Override either
-location with `make install BIN_DIR=... LINK_DIR=...`.
-
-`make install` never edits `settings.json`. It prints the exact diff and stops;
-`statusline-apply` writes it, preserving every other key and keeping a timestamped
-backup. macOS code-signing is applied automatically and skipped elsewhere.
-
-`make uninstall` reverses all of it: both binaries and the symlink are removed,
-and the `statusLine` key is restored from the most recent backup — only that key,
-so anything else you changed since survives. Your ledger database is left alone.
-
-If you only want the `cc-usage` query tool and would rather skip the Makefile:
-
-```sh
-cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage
-```
+Run `cc-usage backfill` once to read the transcripts already on disk.
+`make uninstall` reverses everything and leaves the database alone; `make help`
+covers the remaining targets and options. For the query tool by itself:
+`cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage`.
 
 ## The status line
 
@@ -207,8 +167,10 @@ either, having been observed dropping an entire model from a session's totals.
 
 Only transcripts still on disk can be read. Whatever `cleanupPeriodDays` removed
 before your first backfill is unrecoverable — on the development machine that
-left 11 days and roughly 2 481 requests. Raise the retention first; see Install
-above.
+left 11 days and roughly 2 481 requests. The ledger doesn't need transcripts once
+they have been ingested. If you want to be able to re-ingest after a parser fix,
+raise `cleanupPeriodDays` to 90–180 in `~/.claude/settings.json`; the default 30
+is otherwise fine.
 
 `--cost` estimates API list price assuming standard speed, globally routed
 inference, no server-side tool charges, and the rates dated in `src/pricing.rs`.
