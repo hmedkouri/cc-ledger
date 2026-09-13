@@ -26,13 +26,16 @@ cc-usage backfill     # read every transcript currently on disk
 `statusline-apply` writes it, preserving every other key and keeping a timestamped
 backup. macOS code-signing is applied automatically and skipped elsewhere.
 
-## Set `cleanupPeriodDays` high — today
+## Set `cleanupPeriodDays` high before you start
 
 The ledger only records what it has seen. Anything Claude Code has already
-pruned is gone: on the machine this was developed against, the transcripts went
-back **11 days** while the activity cache showed usage stretching back nine
-months. That history is unrecoverable, because no file on disk carries
-per-request token counts for it.
+pruned is gone for good — no file on disk carries per-request token counts for
+it, so there is nothing left to recover from.
+
+This matters more than it sounds. On the machine this was developed against, the
+surviving transcripts reached back 11 days, while Claude Code's own activity
+cache showed usage stretching back nine months. Everything in between had
+already been deleted.
 
 Raise the retention so the raw transcripts survive as a second, independent
 record:
@@ -44,8 +47,9 @@ record:
 }
 ```
 
-It costs only disk (53 MB for 19 transcripts here). Do it before the next
-cleanup runs, not after.
+Transcripts are plain JSONL and cost little to keep — tens of megabytes for
+months of work. Set this before running the backfill, since the backfill can
+only import what has not already been pruned.
 
 ## Usage
 
@@ -72,7 +76,7 @@ Timestamps are stored as UTC and bucketed in **local** time, so a day is 23 or
 ```
 
 `session` counts the current `sessionId` only. Resuming a session continues that
-count — sessions here routinely span days — while starting a fresh `claude`
+count — a resumed session can span days — while starting a fresh `claude`
 resets it. `today` and `week` sum every session across every project.
 
 `statusline --short` renders a compact variant: directory, context percent and

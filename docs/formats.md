@@ -37,11 +37,11 @@ Newest: `2026-09-13T11:54:50Z`. **That is 11 days of data, total.**
 Meanwhile `~/.claude/stats-cache.json` still lists daily activity from
 `2025-12-29` to `2026-02-15` — message/tool counts only, **no token counts**.
 
-Consequence for the stated goal: a backfill can recover roughly 2 481 requests
-covering 2026-09-02 onward. Consumption before that date is **unrecoverable** —
-no file on this machine carries per-request token counts for it. The ledger is a
-forward-looking instrument; "since my subscription started" can only mean "since
-today" unless an external source is imported.
+Consequence: a backfill can only recover what has not yet been pruned — on this
+machine, roughly 2 481 requests covering 2026-09-02 onward. Consumption before
+that date is **unrecoverable**, because no file on disk carries per-request token
+counts for it. The ledger is a forward-looking instrument: it can only answer
+questions about the period since it started recording.
 
 ---
 
@@ -109,7 +109,7 @@ Content blocks elided; every other field is verbatim shape.
 }
 ```
 
-Field locations confirmed against the spec's assumptions:
+Field locations the parsers rely on, each confirmed against real records:
 
 | Wanted | Actual location | Notes |
 | --- | --- | --- |
@@ -180,9 +180,9 @@ repeat is a byte-identical duplicate of the same billing event.
   sessions**, so session fork/resume does not duplicate billing events, and a
   single-column primary key is safe. [verified]
 
-> (2476 vs 2481 is an artifact of my own analysis: the 2476 figures come from a
-> `cat`-concatenated scratch file, the 2481 from per-file iteration. 2481 is the
-> correct figure.)
+> (2476 vs 2481 is an artifact of how the figures were gathered: the 2476 counts
+> come from a `cat`-concatenated scratch file, the 2481 from per-file iteration.
+> 2481 is the correct figure.)
 
 ### 2.4 `message.usage` — full shape [verified]
 
@@ -467,30 +467,38 @@ the first record regardless, and the `?` on `parse_timestamp` silently abandons
 the whole function on one unparseable timestamp; `get_git_branch` shells out to
 `git` on every single render.
 
-`format_tokens` has a rendering wart worth fixing: `>= 100.0` and the `else`
-branch both round, so 1 234 → `1.2k` but 99 999 → `100k` and 100 001 → `100k`.
-Acceptable; keep the API, keep the tests.
+`format_tokens` is kept as-is apart from one addition: an `M` rung above
+1 000k, because cache-read totals reach hundreds of millions and `383141k` is
+not a number anyone reads at a glance. The rounding boundaries below that are
+unchanged, so 99 999 and 100 001 both render as `100k`.
 
 ---
 
-## 5. Consequences for the design — items needing a decision
+## 5. Consequences for the design
 
-1. **Backfill recovers 11 days, not a subscription's worth.** Per-request token
-   history before 2026-09-02 does not exist on this machine in any form.
-2. **Cost estimation is structurally unreliable here** because `message.model`
-   drops the `[1m]` suffix while the account runs `opus[1m]`. A `pricing.toml`
-   keyed on the bare model id will under-report. The `cost-state` records carry
-   both the true variant and Claude Code's own `costUSD` — if cost matters, that
-   is the honest source, not a hand-maintained price table.
-3. **The payload already carries the subscription's real budget signal** —
-   `rate_limits.five_hour.used_percentage` and `seven_day.used_percentage`, with
-   reset timestamps. For a subscription user this is strictly more actionable
-   than an estimated dollar figure, and it is free (already in the payload, no
-   ledger query, no pricing table).
-4. **Subagent support cannot be validated.** No sidechain records, no `Task`
-   calls, no `subagents/` directories exist. The `isSidechain` field is one line
-   to capture; the `subagents/*.jsonl` directory glob is speculative code against
-   a layout never observed.
-5. **`cleanupPeriodDays` is unset**, so the 30-day default is actively deleting
-   the secondary record. Raising it is the single highest-value change available
-   and costs nothing but disk.
+These findings drove the following decisions.
+
+1. **A backfill recovers only what has not yet been pruned.** Per-request token
+   history older than the retention window does not exist on disk in any form,
+   so the ledger is forward-looking by nature. Raising `cleanupPeriodDays` keeps
+   the raw transcripts as a second, independent record and costs nothing but
+   disk.
+2. **No cost estimation.** `message.model` drops the `[1m]` suffix, so a price
+   table keyed on the recorded model silently under-reports for any account
+   running a 1M-context variant, and no per-request field disambiguates the two
+   (§2.6). The `cost-state` records carry both the true variant name and Claude
+   Code's own `costUSD`, which makes them the honest source if cost is ever
+   wanted — not a hand-maintained price table.
+3. **Rate limits are recorded instead.** The status-line payload carries
+   `rate_limits.five_hour.used_percentage` and `seven_day.used_percentage` with
+   reset timestamps (§3.2). On a subscription that is the actionable signal, it
+   costs nothing extra to read, and it is the only historical record of it that
+   exists anywhere: the server keeps none, and the values disappear from the
+   payload once a window rolls over. Every observed change is written to the
+   `limits` table.
+4. **Subagent support is deliberately incomplete.** No sidechain record, no
+   `Task` call and no `subagents/` directory was observed (§2.7), so the layout
+   is unverified. `isSidechain` is captured and stored, but the
+   `subagents/*.jsonl` glob is left unwritten rather than shipping speculative
+   code against a structure nobody has seen. The `TODO(subagents)` note in
+   `src/transcript.rs` records the discovery heuristic for whoever meets one.
