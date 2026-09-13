@@ -135,6 +135,10 @@ and docs must never contain real transcript data. Claude Code transcripts carry
 project paths and directory names that identify clients, along with session and
 request identifiers.
 
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md). Security
+reports go through [SECURITY.md](SECURITY.md) — privately, please, and redact any
+transcript excerpt you attach.
+
 ## Licence
 
 MIT. Presentation code in `src/render.rs` is adapted from

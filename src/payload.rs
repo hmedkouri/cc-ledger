@@ -6,9 +6,8 @@
 //!
 //! * every field is `Option<T>`, because the payload varies by version, by
 //!   model (`effort` appears only on effort-capable models) and by account
-//!   state (`rate_limits` disappeared from the payload for a stretch earlier
-//!   this year — anthropics/claude-code#45133, so it must degrade to nothing
-//!   rather than error);
+//!   state (`rate_limits` was absent from the payload for a period during 2026,
+//!   so it must degrade to nothing rather than error);
 //! * unknown fields are ignored — never `deny_unknown_fields`. A new Claude
 //!   Code release adding a key must not break the status line.
 

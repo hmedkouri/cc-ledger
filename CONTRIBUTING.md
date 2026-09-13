@@ -3,6 +3,10 @@
 Thanks for taking a look. This is a small, deliberately boring tool; the bar for
 changes is that they keep it that way.
 
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md). If you
+think you have found a security issue, follow [SECURITY.md](SECURITY.md) instead
+of opening a public issue.
+
 ## Getting started
 
 ```sh
