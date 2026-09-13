@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/hmedkouri/cc-ledger/security/advisories/new
+    about: Please report security issues privately, not as a public issue. See SECURITY.md.
+  - name: Data formats reference
+    url: https://github.com/hmedkouri/cc-ledger/blob/main/docs/formats.md
+    about: How Claude Code's transcripts and status-line payload are structured, with provenance. Worth reading before filing a parser bug.

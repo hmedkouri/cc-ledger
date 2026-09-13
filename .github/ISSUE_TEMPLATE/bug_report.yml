@@ -1,0 +1,88 @@
+name: Bug report
+description: Something does not behave the way the docs say it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before pasting anything:** Claude Code transcripts contain project paths
+        and directory names that can identify clients or unreleased work, along
+        with session and request identifiers. Status-line screenshots show your
+        working directory. Redact before posting — see
+        [CONTRIBUTING.md](https://github.com/hmedkouri/cc-ledger/blob/main/CONTRIBUTING.md#never-commit-real-transcript-data).
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: Any transcript excerpt, path, screenshot or `cc-usage` output below has been redacted.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part is misbehaving?
+      options:
+        - statusline (rendering)
+        - statusline (ingest into the ledger)
+        - cc-usage (queries, totals, bucketing)
+        - backfill
+        - build or install
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: If the numbers look wrong
+      description: |
+        Token counts that look roughly doubled usually mean requests are being
+        counted per JSONL line instead of per `message.id` — see
+        `docs/formats.md` §2.3. Counts that run slightly *under* Claude Code's
+        own figures are expected and explained in §2.8.
+
+        Tell us which figure, what it showed, and what you expected.
+    validations:
+      required: false
+
+  - type: input
+    id: cc-ledger-version
+    attributes:
+      label: cc-ledger version
+      description: Output of `git rev-parse --short HEAD`, or the release you installed.
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: e.g. Ubuntu 24.04 x86_64, macOS 15 arm64
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Error output, a redacted sample line, timing figures.
+    validations:
+      required: false

@@ -1,0 +1,78 @@
+name: Claude Code changed a data format
+description: A new Claude Code version writes transcripts or the status-line payload differently
+labels: ["format-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This tool parses formats that Claude Code does not document and is free to
+        change. `docs/formats.md` records what was observed, with provenance for
+        every claim. If a new release moved a field, renamed a record type or
+        changed how usage is reported, this is the place to say so.
+
+        **Redact before pasting.** Transcript records carry project paths,
+        directory names that can identify clients, session IDs and request IDs.
+        Replace them with placeholders as the existing fixtures do.
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: Any record or payload pasted below has been redacted.
+          required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version that changed
+      description: Output of `claude --version`. If you know the last version that worked, say so too.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: What changed
+      options:
+        - Transcript record shape (~/.claude/projects/**/*.jsonl)
+        - Status-line payload on stdin
+        - Where usage tokens live within a record
+        - A new record type appeared
+        - Transcript file layout or location
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: before-after
+    attributes:
+      label: Before and after
+      description: |
+        The field or shape as `docs/formats.md` describes it, and what you now
+        observe. Cite the section if you can — e.g. §2.4 for `message.usage`.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: effect
+    attributes:
+      label: Effect on cc-ledger
+      description: |
+        Does ingest silently skip records, double-count, crash, or produce wrong
+        totals? Every field is optional by design, so a renamed field usually
+        shows up as tokens quietly going missing rather than an error.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: dedupe
+    attributes:
+      label: Dedupe key
+      description: |
+        The ledger is keyed on `message.id`. If that assumption broke, it is the
+        most serious kind of format change this project can have.
+      options:
+        - label: I have checked whether `message.id` is still present and still unique per API response.
+          required: false
