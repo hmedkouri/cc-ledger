@@ -2,6 +2,8 @@
 
 A Claude Code status line backed by a persistent, per-request token ledger.
 
+![The cc-ledger status line: directory and branch, context bar, rate-limit windows with reset countdowns, model, and today's token total](docs/statusline.png)
+
 Claude Code deletes its own transcripts on a schedule (`cleanupPeriodDays`, 30
 days by default), and the token counts go with them. `cc-ledger` reads those
 transcripts incrementally and keeps every request in a local SQLite database
