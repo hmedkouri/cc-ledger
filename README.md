@@ -55,9 +55,10 @@ only import what has not already been pruned.
 
 ```sh
 cc-usage summary --since 2026-06-01
+cc-usage summary --cost
 cc-usage daily   --since 2026-09-01 --by model
 cc-usage weekly  --by project
-cc-usage monthly
+cc-usage monthly --cost --by model
 cc-usage sessions --project ~/projects/example
 cc-usage export --format csv --since 2026-09-01 > usage.csv
 cc-usage backfill --root ~/.claude/projects
@@ -86,18 +87,34 @@ Rendering never blocks on ingest. The line is printed and flushed first; the
 transcript read then runs under a 150 ms wall-clock budget and is abandoned if
 it overruns, because the next invocation resumes from a stored byte cursor.
 
-## Why there is no cost estimate
+## API Cost
 
-There is deliberately no `pricing.toml`. Transcripts record the model as
-`claude-opus-5` whether or not the account is running the 1M-context variant,
-which is priced very differently — and no per-request field distinguishes them.
-Any price table keyed on the recorded model silently under-reports.
+Pass `--cost` to `summary`, `daily`, `weekly` or `monthly` to price recorded
+usage at Anthropic's published API list rates and report it as **API Cost**.
 
-Instead, the status line surfaces `rate_limits.five_hour` and `seven_day`
-directly from Claude Code's payload, and every observed change is written to a
-`limits` table. On a subscription that is the signal that matters, and the
-ledger is the only place that history exists — the server keeps none, and the
-percentages vanish from the payload the moment the window rolls over.
+That is what the usage *would have cost* on the API. A subscription's cost is
+its fee; this number is the one that says whether the subscription is earning
+its keep, and which models and projects consume the value.
+
+Four token classes are priced separately — input, output, cache write and cache
+read — and cache writes differ again by TTL. On real Claude Code traffic the
+split is not what you would guess. In one 11-day sample: cache reads 52% of the
+bill, cache writes 34%, output 14%, uncached input 0.02%. Reporting only input
+and output would have missed 86% of it.
+
+Long context does not change the rate — Claude 4.6 and later bill the full 1M
+context window at standard pricing — so the model id recorded on each request is
+enough to price it.
+
+Rates live in `src/pricing.rs`, verified against the published pricing page on
+2026-09-13. An unknown model id is reported as *unpriced* rather than counted as
+free, so a model introduced by a future Claude Code release cannot silently
+shrink the total.
+
+Separately, the status line records `rate_limits.five_hour` and `seven_day` from
+Claude Code's payload into a `limits` table. On a subscription that is the live
+budget signal, and the ledger is the only place that history exists — the server
+keeps none, and the percentages vanish once a window rolls over.
 
 ## Where things live
 

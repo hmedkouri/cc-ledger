@@ -1,11 +1,14 @@
 //! Query the token ledger.
 //!
-//! Tokens are the unit. There is deliberately no cost estimate: transcripts
-//! record `claude-opus-5` whether or not the account is running the 1M-context
-//! variant, which is priced very differently, so any per-model price table
-//! silently under-reports. `docs/formats.md` §2.6 has the evidence. The
-//! subscription signal worth watching is the rate-limit history the status line
-//! records instead.
+//! Tokens are the unit. `--cost` additionally prices them at Anthropic's
+//! published API list rates and reports the result as **API Cost**: what the
+//! usage would have cost on the API, which is not what a subscription charges.
+//!
+//! Pricing keys on the bare model id recorded in the transcript, which is
+//! sufficient because long context bills at standard rates — see
+//! `src/pricing.rs` and `docs/formats.md` §2.6. Each row is priced
+//! individually, since a project bucket mixes models and cannot be priced from
+//! its aggregate.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,6 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use cc_ledger::bucket;
 use cc_ledger::ledger::{Ledger, Row};
+use cc_ledger::pricing::{self, Cost};
 use cc_ledger::transcript;
 use chrono::Local;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -33,6 +37,9 @@ enum Command {
     Summary {
         #[command(flatten)]
         range: Range,
+        /// Price usage at API list rates and report it as API Cost.
+        #[arg(long)]
+        cost: bool,
     },
     /// Per-day breakdown.
     Daily {
@@ -40,6 +47,9 @@ enum Command {
         range: Range,
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
+        /// Price usage at API list rates and report it as API Cost.
+        #[arg(long)]
+        cost: bool,
     },
     /// Per-week breakdown (weeks start Monday, local time).
     Weekly {
@@ -47,6 +57,9 @@ enum Command {
         range: Range,
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
+        /// Price usage at API list rates and report it as API Cost.
+        #[arg(long)]
+        cost: bool,
     },
     /// Per-month breakdown.
     Monthly {
@@ -54,6 +67,9 @@ enum Command {
         range: Range,
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
+        /// Price usage at API list rates and report it as API Cost.
+        #[arg(long)]
+        cost: bool,
     },
     /// Sessions, most recently active first.
     Sessions {
@@ -137,15 +153,43 @@ struct Totals {
     output: i64,
     cache_create: i64,
     cache_read: i64,
+    cost: Cost,
+    /// Tokens belonging to a model that is not in the price table. Reported
+    /// rather than valued at zero, so an unrecognised model shows as a gap.
+    unpriced: i64,
 }
 
 impl Totals {
+    /// Priced per row, never per bucket: a project bucket mixes models, so the
+    /// aggregate cannot be priced after the fact.
     fn add(&mut self, row: &Row) {
         self.requests += 1;
         self.input += row.input;
         self.output += row.output;
         self.cache_create += row.cache_create;
         self.cache_read += row.cache_read;
+
+        match pricing::cost_of(
+            &row.model,
+            row.input,
+            row.output,
+            row.cache_1h,
+            row.cache_5m,
+            row.cache_read,
+        ) {
+            Some(cost) => self.cost.add(cost),
+            None => self.unpriced += row.total(),
+        }
+    }
+
+    fn merge(&mut self, other: &Totals) {
+        self.requests += other.requests;
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_create += other.cache_create;
+        self.cache_read += other.cache_read;
+        self.cost.add(other.cost);
+        self.unpriced += other.unpriced;
     }
 
     fn total(&self) -> i64 {
@@ -156,10 +200,10 @@ impl Totals {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Summary { range } => summary(range),
-        Command::Daily { range, by } => breakdown(range, by, Period::Day),
-        Command::Weekly { range, by } => breakdown(range, by, Period::Week),
-        Command::Monthly { range, by } => breakdown(range, by, Period::Month),
+        Command::Summary { range, cost } => summary(range, cost),
+        Command::Daily { range, by, cost } => breakdown(range, by, Period::Day, cost),
+        Command::Weekly { range, by, cost } => breakdown(range, by, Period::Week, cost),
+        Command::Monthly { range, by, cost } => breakdown(range, by, Period::Month, cost),
         Command::Sessions { project } => sessions(project),
         Command::Backfill { root } => backfill(root),
         Command::Export { format, range } => export(format, range),
@@ -170,7 +214,7 @@ fn open() -> Result<Ledger> {
     Ledger::open_default()
 }
 
-fn summary(range: Range) -> Result<()> {
+fn summary(range: Range, cost: bool) -> Result<()> {
     let (since, until) = range.resolve()?;
     let rows = open()?.rows(since, until)?;
 
@@ -201,16 +245,20 @@ fn summary(range: Range) -> Result<()> {
     );
     println!();
 
-    print_table("model", &by_model);
+    print_table("model", &by_model, cost);
     println!();
-    let width = print_table("project", &by_project);
+    let width = print_table("project", &by_project, cost);
     println!();
-    print_row("TOTAL", &totals, width);
+    print_row("TOTAL", &totals, width, cost);
+
+    if cost {
+        print_cost_breakdown(&totals);
+    }
 
     Ok(())
 }
 
-fn breakdown(range: Range, by: Option<GroupBy>, period: Period) -> Result<()> {
+fn breakdown(range: Range, by: Option<GroupBy>, period: Period, cost: bool) -> Result<()> {
     let (since, until) = range.resolve()?;
     let rows = open()?.rows(since, until)?;
     if rows.is_empty() {
@@ -237,7 +285,7 @@ fn breakdown(range: Range, by: Option<GroupBy>, period: Period) -> Result<()> {
         None => 10,
         Some(_) => 10 + 2 + group_width(&buckets),
     };
-    print_header(width);
+    print_header(width, cost);
 
     let mut grand = Totals::default();
     for (label, groups) in &buckets {
@@ -247,16 +295,16 @@ fn breakdown(range: Range, by: Option<GroupBy>, period: Period) -> Result<()> {
             } else {
                 format!("{label}  {group}")
             };
-            print_row(&name, totals, width);
-            grand.requests += totals.requests;
-            grand.input += totals.input;
-            grand.output += totals.output;
-            grand.cache_create += totals.cache_create;
-            grand.cache_read += totals.cache_read;
+            print_row(&name, totals, width, cost);
+            grand.merge(totals);
         }
     }
     println!();
-    print_row("TOTAL", &grand, width);
+    print_row("TOTAL", &grand, width, cost);
+
+    if cost {
+        print_cost_breakdown(&grand);
+    }
     Ok(())
 }
 
@@ -403,33 +451,39 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-fn print_header(width: usize) {
-    println!(
+fn header_line(name: &str, width: usize, cost: bool) -> String {
+    let base = format!(
         "{:<width$} {:>8} {:>12} {:>12} {:>13} {:>13} {:>14}",
-        "", "requests", "input", "output", "cache-create", "cache-read", "total",
+        name, "requests", "input", "output", "cache-create", "cache-read", "total",
     );
+    if cost {
+        format!("{base} {:>12}", "API Cost")
+    } else {
+        base
+    }
+}
+
+fn print_header(width: usize, cost: bool) {
+    println!("{}", header_line("", width, cost));
 }
 
 /// Returns the name-column width it used, so a following TOTAL row lines up.
-fn print_table(title: &str, groups: &BTreeMap<String, Totals>) -> usize {
+fn print_table(title: &str, groups: &BTreeMap<String, Totals>, cost: bool) -> usize {
     let width = groups
         .keys()
         .map(|k| shorten(k).len())
         .max()
         .unwrap_or(0)
         .max(title.len());
-    println!(
-        "{:<width$} {:>8} {:>12} {:>12} {:>13} {:>13} {:>14}",
-        title, "requests", "input", "output", "cache-create", "cache-read", "total",
-    );
+    println!("{}", header_line(title, width, cost));
     for (name, totals) in groups {
-        print_row(&shorten(name), totals, width);
+        print_row(&shorten(name), totals, width, cost);
     }
     width
 }
 
-fn print_row(name: &str, t: &Totals, width: usize) {
-    println!(
+fn print_row(name: &str, t: &Totals, width: usize, cost: bool) {
+    let base = format!(
         "{:<width$} {:>8} {:>12} {:>12} {:>13} {:>13} {:>14}",
         name,
         thousands(t.requests),
@@ -439,6 +493,45 @@ fn print_row(name: &str, t: &Totals, width: usize) {
         thousands(t.cache_read),
         thousands(t.total()),
     );
+    if cost {
+        println!("{base} {:>12}", pricing::format_usd(t.cost.total()));
+    } else {
+        println!("{base}");
+    }
+}
+
+/// The breakdown that answers "where does the money actually go".
+fn print_cost_breakdown(t: &Totals) {
+    println!();
+    println!("API Cost — list-price estimate of what this usage would have cost");
+    println!("on the API. It is not what a subscription charges.");
+    println!();
+    let line = |label: &str, amount: f64| {
+        let share = if t.cost.total() > 0.0 {
+            format!("{:>5.1}%", amount / t.cost.total() * 100.0)
+        } else {
+            "    -".to_string()
+        };
+        println!("  {label:<12} {:>12}  {share}", pricing::format_usd(amount));
+    };
+    line("input", t.cost.input);
+    line("output", t.cost.output);
+    line("cache write", t.cost.cache_write);
+    line("cache read", t.cost.cache_read);
+    println!(
+        "  {:<12} {:>12}",
+        "TOTAL",
+        pricing::format_usd(t.cost.total())
+    );
+
+    if t.unpriced > 0 {
+        println!();
+        println!(
+            "  note: {} tokens came from models with no entry in the price",
+            thousands(t.unpriced)
+        );
+        println!("  table and are excluded from the figures above.");
+    }
 }
 
 /// Project directories are long and share a prefix; show the tail.
@@ -496,12 +589,112 @@ mod tests {
             output: 2,
             cache_create: 4,
             cache_read: 8,
+            cache_1h: 4,
+            cache_5m: 0,
         };
         let mut t = Totals::default();
         t.add(&row);
         t.add(&row);
         assert_eq!(t.requests, 2);
         assert_eq!(t.total(), 30);
+    }
+
+    fn row(model: &str) -> Row {
+        Row {
+            ts: 0,
+            model: model.into(),
+            project_dir: "/p".into(),
+            input: 0,
+            output: 0,
+            cache_create: 0,
+            cache_read: 0,
+            cache_1h: 0,
+            cache_5m: 0,
+        }
+    }
+
+    /// A project bucket mixes models, so each row must be priced at its own
+    /// rate before aggregation — 1M Opus output ($25) + 1M Sonnet output ($10).
+    #[test]
+    fn each_row_is_priced_by_its_own_model() {
+        let opus = Row {
+            output: 1_000_000,
+            ..row("claude-opus-5")
+        };
+        let sonnet = Row {
+            output: 1_000_000,
+            ..row("claude-sonnet-5")
+        };
+
+        let mut t = Totals::default();
+        t.add(&opus);
+        t.add(&sonnet);
+
+        assert!((t.cost.output - 35.0).abs() < 1e-9, "{}", t.cost.output);
+        assert_eq!(t.unpriced, 0);
+    }
+
+    /// An unrecognised model must surface as unpriced tokens, never as free
+    /// usage that quietly shrinks the total.
+    #[test]
+    fn unknown_models_are_reported_not_silently_free() {
+        let unknown = Row {
+            input: 10,
+            output: 20,
+            cache_create: 30,
+            cache_read: 40,
+            cache_1h: 30,
+            ..row("claude-unreleased-9")
+        };
+
+        let mut t = Totals::default();
+        t.add(&unknown);
+
+        assert_eq!(t.cost.total(), 0.0);
+        assert_eq!(t.unpriced, 100, "tokens are reported, not valued at zero");
+    }
+
+    /// The TTL split must reach the price: 1h writes cost 2x base input, 5m
+    /// writes 1.25x. Collapsing them understates a 1h-only workload by 37.5%.
+    #[test]
+    fn cache_write_ttl_split_reaches_the_price() {
+        let one_hour = Row {
+            cache_create: 1_000_000,
+            cache_1h: 1_000_000,
+            ..row("claude-opus-5")
+        };
+        let five_min = Row {
+            cache_create: 1_000_000,
+            cache_5m: 1_000_000,
+            ..row("claude-opus-5")
+        };
+
+        let mut a = Totals::default();
+        a.add(&one_hour);
+        let mut b = Totals::default();
+        b.add(&five_min);
+
+        assert!((a.cost.cache_write - 10.00).abs() < 1e-9);
+        assert!((b.cost.cache_write - 6.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_preserves_cost_and_unpriced() {
+        let mut known = Totals::default();
+        known.add(&Row {
+            output: 1_000_000,
+            ..row("claude-opus-5")
+        });
+        let mut unknown = Totals::default();
+        unknown.add(&Row {
+            output: 5,
+            ..row("nope")
+        });
+
+        known.merge(&unknown);
+        assert!((known.cost.total() - 25.0).abs() < 1e-9);
+        assert_eq!(known.unpriced, 5);
+        assert_eq!(known.requests, 2);
     }
 
     #[test]

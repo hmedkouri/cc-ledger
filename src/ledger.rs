@@ -39,6 +39,10 @@ pub struct Row {
     pub output: i64,
     pub cache_create: i64,
     pub cache_read: i64,
+    /// The ephemeral split of `cache_create`. Carried separately because the
+    /// two TTLs are priced differently (1h is 2x base input, 5m is 1.25x).
+    pub cache_1h: i64,
+    pub cache_5m: i64,
 }
 
 impl Row {
@@ -335,7 +339,7 @@ impl Ledger {
     pub fn rows(&self, since: Option<i64>, until: Option<i64>) -> Result<Vec<Row>> {
         let mut stmt = self.conn.prepare(
             "SELECT ts, coalesce(model,'unknown'), coalesce(project_dir,'unknown'),
-                    input, output, cache_create, cache_read
+                    input, output, cache_create, cache_read, cache_1h, cache_5m
              FROM requests
              WHERE ts >= ?1 AND ts < ?2
              ORDER BY ts",
@@ -352,6 +356,8 @@ impl Ledger {
                         output: row.get(4)?,
                         cache_create: row.get(5)?,
                         cache_read: row.get(6)?,
+                        cache_1h: row.get(7)?,
+                        cache_5m: row.get(8)?,
                     })
                 },
             )?

@@ -235,7 +235,7 @@ All 4942 usage objects have exactly this key set. Notes:
 are local placeholders, not API calls. **Skip records where `model` starts with
 `<`** (they contribute nothing but would pollute the model breakdown).
 
-### 2.6 The `[1m]` context-variant problem [verified]
+### 2.6 The `[1m]` suffix, and why it does not affect pricing [verified]
 
 `cost-state` records name models as:
 
@@ -245,15 +245,34 @@ claude-fable-5-1[1m], claude-haiku-4-5-20251001
 ```
 
 But `message.model` on assistant records **never carries the `[1m]` suffix** —
-only the bare id. The 1M-context variants are priced substantially higher than
-the standard-context ones.
+only the bare id. The suffix records which context window the session was
+configured for, not a different price tier.
 
-This machine is configured `"model": "opus[1m]"`, so effectively all traffic is
-the expensive variant while the transcript records it as plain `claude-opus-5`.
+That distinction matters, because long context is **not** billed separately:
 
-**Any pricing table keyed on `message.model` alone will systematically
-under-estimate cost, and there is no per-request field that disambiguates.**
-See §5.
+> Claude 4.6 and later models include the full 1M token context window at
+> standard pricing. (A 900k-token request is billed at the same per-token rate
+> as a 9k-token request.)
+>
+> — <https://platform.claude.com/docs/en/about-claude/pricing>, retrieved 2026-09-13
+
+So the bare model id on each request is sufficient to price it, and
+`src/pricing.rs` keys on it directly. Long-context requests are common rather
+than exceptional — 957 of 2 499 Opus requests on this machine exceeded 200K
+tokens of context, peaking at 799 664 — and every one bills at the standard
+rate.
+
+What does vary is the **token class**: input, output, cache write and cache read
+are priced differently, and cache writes differ again by TTL (1 hour is 2x base
+input, 5 minutes is 1.25x). That is why the ledger stores `cache_1h` and
+`cache_5m` as separate columns — see §2.4. On this machine every cache write was
+1-hour TTL, so collapsing the two would have understated the largest line on the
+bill.
+
+> An earlier revision of this document claimed the opposite — that `[1m]`
+> denoted a premium tier and therefore made pricing from `message.model`
+> unreliable. That was wrong, and the pricing page quoted above is the
+> correction.
 
 ### 2.7 Subagents / sidechains [verified]
 
@@ -483,12 +502,17 @@ These findings drove the following decisions.
    so the ledger is forward-looking by nature. Raising `cleanupPeriodDays` keeps
    the raw transcripts as a second, independent record and costs nothing but
    disk.
-2. **No cost estimation.** `message.model` drops the `[1m]` suffix, so a price
-   table keyed on the recorded model silently under-reports for any account
-   running a 1M-context variant, and no per-request field disambiguates the two
-   (§2.6). The `cost-state` records carry both the true variant name and Claude
-   Code's own `costUSD`, which makes them the honest source if cost is ever
-   wanted — not a hand-maintained price table.
+2. **Cost is estimated from a built-in price table.** `message.model` drops the
+   `[1m]` suffix, but that suffix denotes the configured context window, not a
+   price tier: long context bills at standard rates (§2.6), so the bare model id
+   is enough to price a request. `src/pricing.rs` holds the rates and
+   `cc-usage --cost` reports the result as **API Cost** — an estimate of API
+   list price, not what a subscription charges. Because the four token classes
+   are priced differently and cache writes differ again by TTL, the `cache_1h`
+   and `cache_5m` columns are what make the largest line on the bill correct. An
+   unknown model id is reported as unpriced rather than treated as free. Claude
+   Code's own `cost-state.costUSD` remains a useful cross-check, with the
+   caveats in §2.8.
 3. **Rate limits are recorded instead.** The status-line payload carries
    `rate_limits.five_hour.used_percentage` and `seven_day.used_percentage` with
    reset timestamps (§3.2). On a subscription that is the actionable signal, it

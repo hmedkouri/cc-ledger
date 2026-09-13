@@ -10,5 +10,6 @@
 pub mod bucket;
 pub mod ledger;
 pub mod payload;
+pub mod pricing;
 pub mod render;
 pub mod transcript;
