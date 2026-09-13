@@ -86,6 +86,20 @@ impl Coverage {
     }
 }
 
+/// What a prune removed, or would remove.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PruneCounts {
+    pub requests: i64,
+    pub limits: i64,
+    pub cost_state: i64,
+}
+
+impl PruneCounts {
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0 && self.limits == 0 && self.cost_state == 0
+    }
+}
+
 /// One session, as `cc-usage sessions` lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
@@ -96,11 +110,35 @@ pub struct SessionRow {
     pub tokens: i64,
 }
 
+/// Interns a transcript path and returns its id, caching within the batch —
+/// every record in a batch comes from the same file, so this is one statement
+/// per batch in practice rather than one per record.
+fn transcript_id(
+    tx: &rusqlite::Transaction<'_>,
+    cache: &mut std::collections::HashMap<String, i64>,
+    path: &str,
+) -> Result<i64> {
+    if let Some(id) = cache.get(path) {
+        return Ok(*id);
+    }
+    // The no-op DO UPDATE is what makes RETURNING fire on an existing row.
+    let id: i64 = tx.query_row(
+        "INSERT INTO transcripts (path) VALUES (?1)
+         ON CONFLICT(path) DO UPDATE SET path = excluded.path
+         RETURNING id",
+        [path],
+        |r| r.get(0),
+    )?;
+    cache.insert(path.to_string(), id);
+    Ok(id)
+}
+
 /// The request and session writes shared by [`Ledger::ingest`] and
 /// [`Ledger::ingest_batch`], so both run identical SQL inside whatever
 /// transaction the caller opened.
 fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Result<usize> {
     let mut inserted = 0usize;
+    let mut paths: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     // Merge on conflict rather than ignore. Today every content-block line of
     // a response repeats a byte-identical usage object, so first-line-wins and
     // max() agree — but nothing guarantees Claude Code keeps buffering the
@@ -115,7 +153,7 @@ fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Re
         "INSERT INTO requests
          (dedupe_key, session_id, project_dir, model, ts, input, output,
           cache_create, cache_read, thinking, cache_1h, cache_5m, source,
-          transcript_path, speed, inference_geo)
+          transcript_id, speed, inference_geo)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
          ON CONFLICT(dedupe_key) DO UPDATE SET
            input        = max(requests.input,        excluded.input),
@@ -159,7 +197,7 @@ fn insert_records(tx: &rusqlite::Transaction<'_>, records: &[UsageRecord]) -> Re
             r.cache_1h,
             r.cache_5m,
             r.source.as_str(),
-            r.transcript_path,
+            transcript_id(tx, &mut paths, &r.transcript_path)?,
             r.speed,
             r.inference_geo,
         ])?;
@@ -297,16 +335,26 @@ impl Ledger {
                 cache_1h        INTEGER NOT NULL DEFAULT 0,
                 cache_5m        INTEGER NOT NULL DEFAULT 0,
                 source          TEXT NOT NULL DEFAULT 'main',
-                transcript_path TEXT,
                 -- Added after the first release. Databases created before this
                 -- are widened by the ALTER pass below, not by this statement.
                 speed           TEXT,
-                inference_geo   TEXT
+                inference_geo   TEXT,
+                transcript_id   INTEGER REFERENCES transcripts(id)
             );
             CREATE INDEX IF NOT EXISTS requests_ts         ON requests(ts);
             CREATE INDEX IF NOT EXISTS requests_model_ts   ON requests(model, ts);
             CREATE INDEX IF NOT EXISTS requests_project_ts ON requests(project_dir, ts);
             CREATE INDEX IF NOT EXISTS requests_session    ON requests(session_id);
+
+            -- Transcript paths repeat on every row of a session and average
+            -- ~108 bytes, which measured 39% of the requests table and 22% of
+            -- the whole file across only 19 distinct values. Storing the path
+            -- once and an integer per row is the single largest saving
+            -- available without dropping data.
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id   INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE
+            );
 
             CREATE TABLE IF NOT EXISTS cursors (
                 transcript_path TEXT PRIMARY KEY,
@@ -375,11 +423,64 @@ impl Ledger {
                 "head_hash",
                 "ALTER TABLE cursors ADD COLUMN head_hash INTEGER NOT NULL DEFAULT 0",
             ),
+            (
+                "requests",
+                "transcript_id",
+                "ALTER TABLE requests ADD COLUMN transcript_id INTEGER",
+            ),
         ] {
             if !self.has_column(table, column)? {
                 self.conn.execute(ddl, [])?;
             }
         }
+
+        // Gated on the old column still existing, which is an O(1) schema
+        // lookup. `migrate` runs on every open, including the status line's
+        // pre-render read, so this must not become a table scan once the work
+        // is done — and dropping the column is also the only way the bytes are
+        // actually reclaimed.
+        if self.has_column("requests", "transcript_path")? {
+            self.normalise_transcript_paths()?;
+        }
+        Ok(())
+    }
+
+    /// Move `requests.transcript_path` into `transcripts`, in place, once.
+    ///
+    /// Additive in the sense that matters: every path is preserved, just stored
+    /// once instead of on every row. The column is dropped only after every
+    /// non-null path has been mapped, and the whole thing is one transaction,
+    /// so an interruption leaves the old column intact and the work is redone.
+    fn normalise_transcript_paths(&self) -> Result<()> {
+        // `migrate` holds `&self`, so this is the borrow-checker-free variant
+        // rather than `transaction()`, which needs `&mut`.
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT OR IGNORE INTO transcripts (path)
+             SELECT DISTINCT transcript_path FROM requests
+             WHERE transcript_path IS NOT NULL",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE requests
+                SET transcript_id = (SELECT t.id FROM transcripts t
+                                      WHERE t.path = requests.transcript_path)
+              WHERE transcript_id IS NULL AND transcript_path IS NOT NULL",
+            [],
+        )?;
+
+        let unmapped: i64 = tx.query_row(
+            "SELECT count(*) FROM requests
+              WHERE transcript_id IS NULL AND transcript_path IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        if unmapped == 0 {
+            tx.execute("ALTER TABLE requests DROP COLUMN transcript_path", [])?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -635,6 +736,89 @@ impl Ledger {
         Ok(row)
     }
 
+    /// Bytes the database occupies on disk, including indexes and free pages.
+    pub fn file_bytes(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// What `prune` would remove, without removing it.
+    pub fn prune_preview(&self, before: i64) -> Result<PruneCounts> {
+        let count =
+            |sql: &str| -> Result<i64> { Ok(self.conn.query_row(sql, [before], |r| r.get(0))?) };
+        Ok(PruneCounts {
+            requests: count("SELECT count(*) FROM requests WHERE ts < ?1")?,
+            limits: count("SELECT count(*) FROM limits WHERE ts < ?1")?,
+            cost_state: count("SELECT count(*) FROM cost_state WHERE captured_at < ?1")?,
+        })
+    }
+
+    /// Delete everything older than `before`, then compact.
+    ///
+    /// `VACUUM` cannot run inside a transaction, so the deletes commit first;
+    /// a crash between them leaves a correct but uncompacted database, which
+    /// the next prune finishes.
+    pub fn prune(&mut self, before: i64) -> Result<PruneCounts> {
+        let counts = self.prune_preview(before)?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM requests WHERE ts < ?1", [before])?;
+        tx.execute("DELETE FROM limits WHERE ts < ?1", [before])?;
+        tx.execute("DELETE FROM cost_state WHERE captured_at < ?1", [before])?;
+        // Paths no longer referenced by any request.
+        tx.execute(
+            "DELETE FROM transcripts
+              WHERE id NOT IN (SELECT transcript_id FROM requests
+                                WHERE transcript_id IS NOT NULL)",
+            [],
+        )?;
+        tx.commit()?;
+        self.conn.execute_batch("VACUUM")?;
+        Ok(counts)
+    }
+
+    /// Cursor rows whose transcript is no longer on disk. Sessions are deleted
+    /// by Claude Code's own pruning, and their cursors would otherwise
+    /// accumulate forever.
+    pub fn stale_cursors(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT transcript_path FROM cursors")?;
+        let paths: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(paths
+            .into_iter()
+            .filter(|p| !std::path::Path::new(p).exists())
+            .collect())
+    }
+
+    pub fn delete_cursors(&self, paths: &[String]) -> Result<usize> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("DELETE FROM cursors WHERE transcript_path = ?1")?;
+        let mut removed = 0;
+        for p in paths {
+            removed += stmt.execute([p])?;
+        }
+        Ok(removed)
+    }
+
+    /// Fold the write-ahead log back into the database and truncate it.
+    ///
+    /// Status line processes are short-lived and sometimes killed mid-pass, so
+    /// they cannot be relied on to checkpoint. `backfill` is the one
+    /// long-running writer that can.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(()),
+                other => Err(other),
+            })?;
+        Ok(())
+    }
+
     pub fn request_count(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -647,7 +831,7 @@ impl Ledger {
     /// collapsing.
     pub fn duplicate_sources(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, count(DISTINCT transcript_path) c
+            "SELECT session_id, count(DISTINCT transcript_id) c
              FROM requests WHERE session_id IS NOT NULL
              GROUP BY session_id HAVING c > 1",
         )?;
@@ -936,6 +1120,138 @@ mod tests {
             "same session across two transcripts shows up"
         );
         assert_eq!(dupes[0].1, 2);
+    }
+
+    /// A database written before normalisation must migrate in place: every
+    /// path preserved, every row re-pointed, and the wide column dropped —
+    /// without the drop the bytes are never reclaimed, and `migrate` would
+    /// rescan the table on every open, including the render path.
+    #[test]
+    fn legacy_transcript_paths_are_normalised_in_place() {
+        let dir = std::env::temp_dir().join(format!("cc-ledger-norm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.db");
+
+        // Hand-built pre-normalisation shape: transcript_path on every row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE requests (
+                     dedupe_key TEXT PRIMARY KEY, session_id TEXT, project_dir TEXT,
+                     model TEXT, ts INTEGER NOT NULL,
+                     input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+                     cache_create INTEGER NOT NULL DEFAULT 0,
+                     cache_read INTEGER NOT NULL DEFAULT 0,
+                     thinking INTEGER NOT NULL DEFAULT 0,
+                     cache_1h INTEGER NOT NULL DEFAULT 0,
+                     cache_5m INTEGER NOT NULL DEFAULT 0,
+                     source TEXT NOT NULL DEFAULT 'main',
+                     transcript_path TEXT);
+                 INSERT INTO requests (dedupe_key, session_id, ts, transcript_path)
+                      VALUES ('a','s1',1000,'/p/one.jsonl'),
+                             ('b','s1',2000,'/p/one.jsonl'),
+                             ('c','s2',3000,'/p/two.jsonl');",
+            )
+            .unwrap();
+        }
+
+        let l = Ledger::open(&path).unwrap();
+
+        assert!(
+            !l.has_column("requests", "transcript_path").unwrap(),
+            "the wide column is dropped once every row is mapped"
+        );
+        assert_eq!(l.request_count().unwrap(), 3, "no rows lost");
+
+        let unmapped: i64 = l
+            .conn
+            .query_row(
+                "SELECT count(*) FROM requests WHERE transcript_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unmapped, 0, "every row re-pointed");
+
+        let mut stmt = l
+            .conn
+            .prepare("SELECT path FROM transcripts ORDER BY path")
+            .unwrap();
+        let paths: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["/p/one.jsonl", "/p/two.jsonl"],
+            "each distinct path stored exactly once"
+        );
+        drop(stmt);
+
+        // Re-opening must be a no-op, not a second migration.
+        drop(l);
+        let l = Ledger::open(&path).unwrap();
+        assert_eq!(l.request_count().unwrap(), 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_previews_before_it_deletes_and_drops_orphaned_paths() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        let mut old = record("old", 1_000, 10);
+        old.transcript_path = "/gone.jsonl".into();
+        let mut new = record("new", 90_000, 10);
+        new.transcript_path = "/kept.jsonl".into();
+        l.ingest(&[old, new]).unwrap();
+
+        let preview = l.prune_preview(50_000).unwrap();
+        assert_eq!(preview.requests, 1, "only the older row");
+        assert_eq!(
+            l.request_count().unwrap(),
+            2,
+            "a preview must not delete anything"
+        );
+
+        let removed = l.prune(50_000).unwrap();
+        assert_eq!(removed.requests, 1);
+        assert_eq!(l.request_count().unwrap(), 1, "the newer row survives");
+
+        let paths: i64 = l
+            .conn
+            .query_row("SELECT count(*) FROM transcripts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(paths, 1, "the path nothing references any more is gone");
+    }
+
+    #[test]
+    fn prune_with_nothing_older_is_a_no_op() {
+        let mut l = Ledger::open_in_memory().unwrap();
+        l.ingest(&[record("a", 90_000, 10)]).unwrap();
+
+        assert!(l.prune_preview(1_000).unwrap().is_empty());
+        assert_eq!(l.prune(1_000).unwrap().requests, 0);
+        assert_eq!(l.request_count().unwrap(), 1);
+    }
+
+    /// Claude Code deletes its own transcripts, so cursors pointing at files
+    /// that no longer exist would otherwise accumulate forever.
+    #[test]
+    fn cursors_for_deleted_transcripts_are_reported_and_removable() {
+        let l = Ledger::open_in_memory().unwrap();
+        let cursor = Cursor {
+            byte_offset: 10,
+            file_id: 1,
+            head_hash: 1,
+        };
+        l.set_cursor("/definitely/not/on/disk.jsonl", cursor, 0)
+            .unwrap();
+
+        let stale = l.stale_cursors().unwrap();
+        assert_eq!(stale, ["/definitely/not/on/disk.jsonl"]);
+        assert_eq!(l.delete_cursors(&stale).unwrap(), 1);
+        assert!(l.stale_cursors().unwrap().is_empty());
     }
 
     /// Claude Code rewrites `cwd` mid-session when the working directory moves,

@@ -87,6 +87,7 @@ cc-usage monthly --cost --by model
 cc-usage sessions --project ~/projects/example
 cc-usage export --format csv --since 2026-09-01 > usage.csv
 cc-usage backfill --root ~/.claude/projects
+cc-usage prune --before 2026-01-01        # reports only; --yes to apply
 ```
 
 Dates are `YYYY-MM-DD` in local time. `--until` is exclusive. Columns are
@@ -208,6 +209,15 @@ Claude Code sessions write to it concurrently. Every write upserts on a stable
 key, merging each token field with `max()`, so a repeated, concurrent or
 abandoned pass cannot double-count — and a partially written first record is
 corrected rather than kept, because usage only ever grows within a response.
+
+A request costs about 356 bytes once every index is counted. At the development
+machine's rate of roughly 250 requests a day that is around 92 000 rows and
+31 MB a year, which is small enough to forget about. Transcript paths are the
+reason it is not considerably larger: they repeat on every row and averaged 108
+bytes across only 19 distinct values, so they live in a `transcripts` table and
+each request stores an integer instead — worth 27% of an existing ledger. If you
+do want the space back, `cc-usage prune --before 2026-01-01` prints what it
+would remove and deletes nothing until you add `--yes`, then compacts the file.
 
 ## The one thing worth knowing about the data
 

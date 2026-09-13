@@ -87,6 +87,15 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Delete ledger rows older than a date, then compact the database.
+    Prune {
+        /// Delete everything strictly before this date (YYYY-MM-DD, local).
+        #[arg(long)]
+        before: String,
+        /// Actually delete. Without it, prune only reports what it would do.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Dump raw rows.
     Export {
         /// Output format for the dumped rows.
@@ -214,6 +223,7 @@ fn main() -> Result<()> {
         Command::Monthly { range, by, cost } => breakdown(range, by, Period::Month, cost),
         Command::Sessions { project } => sessions(project),
         Command::Backfill { root } => backfill(root),
+        Command::Prune { before, yes } => prune(before, yes),
         Command::Export { format, range } => export(format, range),
     }
 }
@@ -423,7 +433,84 @@ fn backfill(root: Option<PathBuf>) -> Result<()> {
     for (session, count) in ledger.duplicate_sources()? {
         println!("note: session {session} appears in {count} transcripts");
     }
+
+    // Housekeeping that only backfill can do. Status line processes are
+    // short-lived and sometimes killed mid-pass, so they cannot be relied on to
+    // checkpoint the WAL or to notice that a transcript has been pruned.
+    let stale = ledger.stale_cursors()?;
+    if !stale.is_empty() {
+        let removed = ledger.delete_cursors(&stale)?;
+        println!("Dropped {removed} cursors whose transcript no longer exists.");
+    }
+    ledger.checkpoint()?;
+
     Ok(())
+}
+
+/// Reports before it deletes, and refuses to delete without `--yes`.
+fn prune(before: String, yes: bool) -> Result<()> {
+    let cutoff = bucket::parse_date(&before, &Local)
+        .with_context(|| format!("--before is not a YYYY-MM-DD date: {before}"))?;
+
+    let mut ledger = open()?;
+    let counts = ledger.prune_preview(cutoff)?;
+    let bytes_before = ledger.file_bytes()?;
+
+    println!(
+        "Older than {before}: {} requests, {} rate-limit observations, \
+         {} session cost snapshots.",
+        thousands(counts.requests),
+        thousands(counts.limits),
+        thousands(counts.cost_state),
+    );
+
+    if counts.is_empty() {
+        println!("Nothing to prune.");
+        return Ok(());
+    }
+
+    // Only an estimate: how much a delete actually frees is not known until
+    // VACUUM has repacked the pages, so this is measured bytes-per-row times
+    // the rows going away.
+    let rows_total = ledger.request_count()?.max(1);
+    let approx = counts.requests * (bytes_before / rows_total);
+    println!(
+        "Database is {} now; removing those would free roughly {}.",
+        bytes_human(bytes_before),
+        bytes_human(approx),
+    );
+
+    if !yes {
+        println!();
+        println!("Nothing was deleted. Re-run with --yes to apply.");
+        println!("Pruned rows are gone for good: the transcripts they came from");
+        println!("may already have been deleted by Claude Code's own cleanup.");
+        return Ok(());
+    }
+
+    let removed = ledger.prune(cutoff)?;
+    let bytes_after = ledger.file_bytes()?;
+    println!(
+        "Deleted {} requests, {} limits, {} cost snapshots.",
+        thousands(removed.requests),
+        thousands(removed.limits),
+        thousands(removed.cost_state),
+    );
+    println!(
+        "Database {} → {}, {} reclaimed.",
+        bytes_human(bytes_before),
+        bytes_human(bytes_after),
+        bytes_human(bytes_before - bytes_after),
+    );
+    Ok(())
+}
+
+fn bytes_human(bytes: i64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} kB", bytes / 1024)
+    }
 }
 
 fn default_root() -> PathBuf {
