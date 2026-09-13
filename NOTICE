@@ -15,8 +15,36 @@ Specifically, `src/render.rs` adapts that project's status-line presentation:
   * the `fish_shorten_path`, `truncate_middle`, `format_tokens` and
     `format_cost` helpers, and their tests.
 
-A copy of the MIT License as distributed with cc-statusline-rs is included in
-LICENSE alongside this project's own licence grant, which is also MIT.
+The MIT License as distributed with cc-statusline-rs is reproduced in full
+below. This project's own licence grant, also MIT, is in LICENSE — kept to that
+one licence text so automated classifiers report the project correctly.
 
 Everything else — the transcript reader, the dedupe scheme, the SQLite ledger,
 the rate-limit history and the `cc-usage` CLI — is original to this project.
+
+
+----------------------------------------------------------------------------
+cc-statusline-rs — https://github.com/khoi/cc-statusline-rs
+----------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2025 khoi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
