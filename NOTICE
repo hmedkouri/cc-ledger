@@ -1,0 +1,22 @@
+cc-ledger
+=========
+
+This project adapts code from:
+
+  cc-statusline-rs — https://github.com/khoi/cc-statusline-rs
+  Copyright (c) khoi
+  Licensed under the MIT License.
+
+Specifically, `src/render.rs` adapts that project's status-line presentation:
+
+  * the Nerd Font icon choices, ANSI colour palette and segment separator;
+  * the context-usage colour thresholds (50% / 70% / 90%) and the ten-cell
+    block bar;
+  * the `fish_shorten_path`, `truncate_middle`, `format_tokens` and
+    `format_cost` helpers, and their tests.
+
+A copy of the MIT License as distributed with cc-statusline-rs is included in
+LICENSE alongside this project's own licence grant, which is also MIT.
+
+Everything else — the transcript reader, the dedupe scheme, the SQLite ledger,
+the rate-limit history and the `cc-usage` CLI — is original to this project.
