@@ -1,0 +1,50 @@
+name: Release
+
+# Prebuilt binaries for people who have no Rust toolchain, which is most Claude
+# Code users. Triggered by pushing a v* tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux targets are musl, so the artifacts are statically linked and do
+          # not inherit the runner's glibc version as a minimum requirement. A
+          # stock ubuntu-latest gnu build refuses to start on older distributions,
+          # which is the usual way prebuilt Rust binaries disappoint people.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # Builds both binaries for the target, strips them, archives, generates a
+      # SHA256 alongside each archive, and attaches everything to the release.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: statusline,cc-usage
+          target: ${{ matrix.target }}
+          archive: cc-ledger-$tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
