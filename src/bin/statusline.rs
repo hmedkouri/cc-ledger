@@ -26,7 +26,21 @@ use cc_ledger::transcript;
 const INGEST_BUDGET: Duration = Duration::from_millis(150);
 
 fn main() {
-    let short = std::env::args().any(|a| a == "--short");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Handled before touching stdin: run by hand from a terminal, this would
+    // otherwise block forever waiting for a payload that is never typed. clap
+    // is deliberately not linked into this binary — it runs on every render.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("statusline {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    let short = args.iter().any(|a| a == "--short");
     let home = std::env::var("HOME").unwrap_or_default();
 
     let mut stdin = String::new();
@@ -55,6 +69,24 @@ fn main() {
 
     // The user has their line. Everything below is best-effort.
     ingest_within_budget(payload, now);
+}
+
+fn print_usage() {
+    println!("statusline {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("The Claude Code status line for cc-ledger. Reads the status-line JSON");
+    println!("payload on stdin, prints one line, then ingests new usage records from");
+    println!("the session transcript into the ledger.");
+    println!();
+    println!("Usage: statusline [--short] < payload.json");
+    println!();
+    println!("Options:");
+    println!("      --short    Compact variant: directory, context percent, today's tokens");
+    println!("  -h, --help     Print help");
+    println!("  -V, --version  Print version");
+    println!();
+    println!("Not normally run by hand: Claude Code invokes it via the statusLine entry");
+    println!("in ~/.claude/settings.json. Use `cc-usage` to query the ledger.");
 }
 
 fn print_line(line: &str) {

@@ -199,6 +199,47 @@ fn short_flag_renders_a_compact_line() {
     assert!(short.contains("42%"));
 }
 
+/// `--help` and `--version` must be answered before stdin is read. Run by hand
+/// from a terminal the binary would otherwise sit waiting for a payload nobody
+/// is going to type. If the flag handling were removed this would print the
+/// fallback status line instead of usage text, so the assertion catches it.
+#[test]
+fn help_and_version_are_answered_without_a_payload() {
+    for flag in ["--help", "-h"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_statusline"))
+            .arg(flag)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("statusline runs")
+            .wait_with_output()
+            .expect("statusline exits");
+
+        assert!(out.status.success(), "{flag} must exit 0");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("Usage:"), "{flag} printed: {text}");
+        assert!(text.contains("--short"), "{flag} should document --short");
+    }
+
+    for flag in ["--version", "-V"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_statusline"))
+            .arg(flag)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("statusline runs")
+            .wait_with_output()
+            .expect("statusline exits");
+
+        assert!(out.status.success(), "{flag} must exit 0");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.starts_with("statusline ") && text.trim().len() > "statusline ".len(),
+            "{flag} printed: {text}"
+        );
+    }
+}
+
 /// The status line must never break Claude Code, whatever arrives on stdin.
 #[test]
 fn malformed_payload_still_prints_and_exits_zero() {

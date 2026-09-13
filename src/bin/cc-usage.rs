@@ -24,6 +24,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Parser)]
 #[command(
     name = "cc-usage",
+    version,
     about = "Query the cc-ledger Claude Code token ledger"
 )]
 struct Cli {
@@ -45,6 +46,7 @@ enum Command {
     Daily {
         #[command(flatten)]
         range: Range,
+        /// Split each bucket by model or by project.
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
         /// Price usage at API list rates and report it as API Cost.
@@ -55,6 +57,7 @@ enum Command {
     Weekly {
         #[command(flatten)]
         range: Range,
+        /// Split each bucket by model or by project.
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
         /// Price usage at API list rates and report it as API Cost.
@@ -65,6 +68,7 @@ enum Command {
     Monthly {
         #[command(flatten)]
         range: Range,
+        /// Split each bucket by model or by project.
         #[arg(long, value_enum)]
         by: Option<GroupBy>,
         /// Price usage at API list rates and report it as API Cost.
@@ -73,16 +77,19 @@ enum Command {
     },
     /// Sessions, most recently active first.
     Sessions {
+        /// Only sessions whose project directory matches this path exactly.
         #[arg(long)]
         project: Option<String>,
     },
     /// Walk every transcript on disk and ingest what is missing.
     Backfill {
+        /// Transcript root to walk [default: ~/.claude/projects].
         #[arg(long)]
         root: Option<PathBuf>,
     },
     /// Dump raw rows.
     Export {
+        /// Output format for the dumped rows.
         #[arg(long, value_enum)]
         format: Format,
         #[command(flatten)]
