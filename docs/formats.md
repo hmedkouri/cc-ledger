@@ -20,7 +20,7 @@ Provenance markers used throughout:
 | --- | --- |
 | Claude Code version | 2.1.270 |
 | rustc / cargo | 1.96.1 |
-| `statusLine` (current) | `{"type":"command","command":"~/.claude/cc-statusline-rs"}` |
+| `statusLine` (current) | already set to a third-party command — replacing it must preserve the old value, hence the timestamped backup in `make statusline-apply` |
 | `cleanupPeriodDays` | **not set** → default 30 days |
 | Transcript root | `~/.claude/projects/` |
 | Transcript count / size | 19 files, 53 MB |
@@ -180,8 +180,11 @@ Counts across all transcripts:
 The last row is the proof: distinct usage tuples == distinct `message.id`. Every
 repeat is a byte-identical duplicate of the same billing event.
 
-**Summing every line would roughly double every number in the ledger** (4942 vs
-2476). Highest observed repeat factor for a single response: **25 lines**.
+**Summing every line would double-count every response.** The factor is the
+number of content blocks per response, so it varies with workload rather than
+being a constant of the format — a tool-heavy agentic turn emits several blocks,
+a plain prose answer one. On this machine it worked out at two (4942 vs 2476).
+Highest observed repeat factor for a single response: **25 lines**.
 
 #### Dedupe key decision: `message.id`
 

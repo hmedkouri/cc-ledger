@@ -53,7 +53,7 @@ backup. macOS code-signing is applied automatically and skipped elsewhere.
 ## The status line
 
 ```
-~/p/T/cc-ledger main(+6878 -355) • ████████░░ 80% • 5h 50% (2h10m) 7d 38% (3d) • Opus 5 · 1M · high • today 91M
+~/p/T/cc-ledger main(+412 -37) • ████████░░ 80% • 5h 50% (2h10m) 7d 38% (3d) • Opus 5 · 1M · high • today 91M
 ```
 
 Directory and branch, then context, then rate limits, then model, then today.
@@ -119,10 +119,12 @@ its fee; this number is the one that says whether the subscription is earning
 its keep, and which models and projects consume the value.
 
 Four token classes are priced separately — input, output, cache write and cache
-read — and cache writes differ again by TTL. On real Claude Code traffic the
-split is not what you would guess. In one 11-day sample: cache reads 52% of the
-bill, cache writes 34%, output 14%, uncached input 0.02%. Reporting only input
-and output would have missed 86% of it.
+read — and cache writes differ again by TTL. In the 11-day development sample,
+cache reads were 52% of the bill, cache writes 34%, output 14%, uncached input
+0.02%. That mix is characteristic of long agentic sessions holding a large stable
+context; short chat turns cache far less. What holds regardless of workload is
+that the four classes carry different rates, and a report that prices only input
+and output can miss most of the bill — 86% of it in this sample.
 
 Long context does not change the rate — Claude 4.6 and later bill the full 1M
 context window at standard pricing — so the model id recorded on each request is
@@ -214,8 +216,9 @@ A request costs about 356 bytes once every index is counted. At the development
 machine's rate of roughly 250 requests a day that is around 92 000 rows and
 31 MB a year, which is small enough to forget about. Transcript paths are the
 reason it is not considerably larger: they repeat on every row and averaged 108
-bytes across only 19 distinct values, so they live in a `transcripts` table and
-each request stores an integer instead — worth 27% of an existing ledger. If you
+bytes, so they live in a `transcripts` table and each request stores an integer
+instead. The saving scales with rows per transcript — at ~150 rows per transcript
+the development database shrank 27%; many short sessions save less. If you
 do want the space back, `cc-usage prune --before 2026-01-01` prints what it
 would remove and deletes nothing until you add `--yes`, then compacts the file.
 
@@ -223,10 +226,13 @@ would remove and deletes nothing until you add `--yes`, then compacts the file.
 
 A single API response is written to the transcript as **one JSONL line per
 content block**, and every one of those lines repeats the identical, complete
-`usage` object. Summing lines roughly doubles every number — 4 942 lines for
-2 481 real requests on the development machine, with one response spanning 25
-lines. The ledger is keyed on `message.id`, which is non-null on every usage
-record and unique across every transcript on disk.
+`usage` object. Summing lines therefore double-counts every response, by a factor
+equal to the number of content blocks it contains — several for a tool-heavy
+agentic turn, one for a plain prose answer — so the size of the error depends on
+how you work. On the development machine that factor was two: 4 942 lines for
+2 481 real requests, with one response spanning 25 lines. The ledger is keyed on
+`message.id`, which is non-null on every usage record and unique across every
+transcript on disk.
 
 `docs/formats.md` documents every field, with provenance and sample redacted
 records. Read it before changing a parser.
