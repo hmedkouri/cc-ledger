@@ -203,9 +203,21 @@ fn bar(pct: f64) -> String {
 // Formatting helpers, adapted from khoi/cc-statusline-rs (MIT).
 // ---------------------------------------------------------------------------
 
+/// Mirrors the reference implementation's `k` ladder, extended with an `M`
+/// rung. Cache-read totals run into the hundreds of millions, and `383141k`
+/// is not a number anyone reads at a glance.
 pub fn format_tokens(tokens: u64) -> String {
     let k = tokens as f64 / 1000.0;
-    if k >= 100.0 {
+    if k >= 1000.0 {
+        let m = k / 1000.0;
+        if m >= 100.0 {
+            format!("{}M", m.round() as u64)
+        } else if m >= 10.0 {
+            format!("{m:.0}M")
+        } else {
+            format!("{m:.1}M")
+        }
+    } else if k >= 100.0 {
         format!("{}k", k.round() as u64)
     } else if k >= 10.0 {
         format!("{k:.0}k")
@@ -335,7 +347,7 @@ mod tests {
         // whole-k formatting.
         assert!(text.contains("12k session"), "session tokens: {text}");
         assert!(text.contains("250k"), "today tokens: {text}");
-        assert!(text.contains("1200k"), "week tokens: {text}");
+        assert!(text.contains("1.2M"), "week tokens: {text}");
         assert!(text.contains("5h 13%"), "five hour limit: {text}");
         assert!(text.contains("7d 44%"), "seven day limit: {text}");
     }
@@ -409,7 +421,11 @@ mod tests {
         assert_eq!(format_tokens(1_234), "1.2k");
         assert_eq!(format_tokens(12_340), "12k");
         assert_eq!(format_tokens(250_000), "250k");
-        assert_eq!(format_tokens(1_200_000), "1200k");
+        assert_eq!(format_tokens(999_499), "999k", "last rung below M");
+        assert_eq!(format_tokens(1_000_000), "1.0M", "first rung at M");
+        assert_eq!(format_tokens(1_200_000), "1.2M");
+        assert_eq!(format_tokens(15_000_000), "15M");
+        assert_eq!(format_tokens(383_141_000), "383M", "a real week's total");
     }
 
     #[test]

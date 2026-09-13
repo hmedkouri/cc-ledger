@@ -68,8 +68,12 @@ Timestamps are stored as UTC and bucketed in **local** time, so a day is 23 or
 ### The status line
 
 ```
-~/p/T/cc-ledger  main(+188 -10) • Opus 5 (high) • ███░░░░░░░ 38% • 12.3k session • today 250k / week 1200k • 5h 13% 7d 44%
+~/p/T/cc-ledger  master(+2405 -6) • ██████░░░░ 63% • Opus 5 (high) • 5.5M session • today 8.6M / week 383M • 5h 31% 7d 59%
 ```
+
+`session` counts the current `sessionId` only. Resuming a session continues that
+count — sessions here routinely span days — while starting a fresh `claude`
+resets it. `today` and `week` sum every session across every project.
 
 `statusline --short` renders a compact variant: directory, context percent and
 today's tokens.
