@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Claude Code status line backed by a persistent per-request token ledger"
 license = "MIT"
+repository = "https://github.com/hmedkouri/cc-ledger"
+readme = "README.md"
+keywords = ["claude", "claude-code", "statusline", "tokens", "sqlite"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "cc_ledger"

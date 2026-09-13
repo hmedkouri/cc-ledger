@@ -128,6 +128,13 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). One rule worth stating up front: fixtures
+and docs must never contain real transcript data. Claude Code transcripts carry
+project paths and directory names that identify clients, along with session and
+request identifiers.
+
 ## Licence
 
 MIT. Presentation code in `src/render.rs` is adapted from
