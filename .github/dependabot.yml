@@ -17,3 +17,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore"
+    ignore:
+      # dtolnay/rust-toolchain tags releases after Rust versions, so the `@1.87`
+      # in the msrv job is the toolchain being tested, not an action version to
+      # keep current. Dependabot reads it as semver and proposed "1.87 -> 1.120",
+      # which would have silently retargeted the MSRV job at a newer compiler and
+      # made the floor in Cargo.toml unenforced while still reporting green.
+      - dependency-name: dtolnay/rust-toolchain

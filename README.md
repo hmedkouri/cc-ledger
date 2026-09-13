@@ -192,8 +192,13 @@ bill or auditing against an invoice.
 
 ## Performance
 
-A cold render is budgeted under 20 ms in release, asserted in `tests/timing.rs`.
-It spawns no subprocess of any kind: the branch comes from reading `.git/HEAD`
+A cold render is budgeted under 20 ms in release on Linux, asserted in
+`tests/timing.rs`. That test measures a whole process invocation, so macOS uses a
+looser bound: the GitHub macOS runner spent 70 ms just spawning the binary while
+running the in-process work faster than Linux did, which makes the figure there a
+statement about process startup rather than about this crate.
+The status line itself spawns no subprocess of any kind: the branch comes from
+reading `.git/HEAD`
 directly, and there is no network-facing dependency in the crate. For scale, the
 reference implementation this borrows its styling from spawns `git` twice on
 every single render — once to test whether the directory is a repository, then
