@@ -9,3 +9,6 @@
 
 # Machine-local Claude Code config (proxy URLs, per-machine hooks).
 .claude/
+
+# Serena's per-machine project cache and memories.
+.serena/
