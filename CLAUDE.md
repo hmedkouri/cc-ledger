@@ -37,3 +37,15 @@ cargo test
 Timing budgets only mean anything in `--release`; in debug they relax to loose
 bounds. Never run a schema migration against the live ledger — work on a
 `sqlite3 .backup` copy.
+
+## 2026-09-14 — `cc-usage install` prints, it never writes
+
+Claude Code survives a broken status line; it does not start at all with a
+malformed `~/.claude/settings.json`. The one file an installer would edit is the
+one this tool must never corrupt, so `install` prints the `statusLine` key and
+the paste stays the user's. `make statusline-apply` is the only writer, guarded
+by `jq` validation and a timestamped backup.
+
+If a writing version is ever built: `serde_json`'s default map sorts keys
+alphabetically on rewrite, so it needs the `preserve_order` feature or the
+user's settings come back reordered — a "harmless" surprise that costs trust.

@@ -104,6 +104,8 @@ enum Command {
         #[command(flatten)]
         range: Range,
     },
+    /// Print the settings.json key that points Claude Code at the status line.
+    Install,
 }
 
 #[derive(Args, Clone)]
@@ -225,11 +227,35 @@ fn main() -> Result<()> {
         Command::Backfill { root } => backfill(root),
         Command::Prune { before, yes } => prune(before, yes),
         Command::Export { format, range } => export(format, range),
+        Command::Install => install(),
     }
 }
 
 fn open() -> Result<Ledger> {
     Ledger::open_default()
+}
+
+/// Print the `statusLine` key for `~/.claude/settings.json`, with the absolute
+/// path Claude Code needs.
+///
+/// Printing rather than writing is deliberate. A broken status line degrades
+/// Claude Code; a malformed `settings.json` stops it starting, and that file is
+/// the one an installer would have to edit. `make statusline-apply` is the only
+/// writer, and it validates with `jq` and keeps a backup first.
+fn install() -> Result<()> {
+    let exe = std::env::current_exe().context("cannot locate the running cc-usage binary")?;
+    let statusline = exe.with_file_name("statusline");
+    println!("{}", settings_key(&statusline.to_string_lossy()));
+    Ok(())
+}
+
+fn settings_key(statusline: &str) -> String {
+    // serde_json does the escaping, so a path holding a quote or a backslash
+    // survives the paste as valid JSON.
+    format!(
+        "\"statusLine\": {{\"type\": \"command\", \"command\": {}}}",
+        serde_json::Value::String(statusline.to_owned())
+    )
 }
 
 fn summary(range: Range, cost: bool) -> Result<()> {
@@ -696,6 +722,19 @@ mod tests {
         assert_eq!(thousands(1_000), "1 000");
         assert_eq!(thousands(47_312_579), "47 312 579");
         assert_eq!(thousands(-1_234), "-1 234");
+    }
+
+    /// The printed key is pasted straight into settings.json, so it has to
+    /// parse as JSON there — including when the path holds a quote.
+    #[test]
+    fn settings_key_pastes_as_valid_json() {
+        for path in ["/home/u/.claude/bin/statusline", "/tmp/we\"ird/statusline"] {
+            let object = format!("{{{}}}", settings_key(path));
+            let parsed: serde_json::Value =
+                serde_json::from_str(&object).expect("printed key is not valid JSON");
+            assert_eq!(parsed["statusLine"]["type"], "command");
+            assert_eq!(parsed["statusLine"]["command"], path);
+        }
     }
 
     #[test]
