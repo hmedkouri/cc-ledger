@@ -85,6 +85,15 @@ loose bounds — check the release figures before claiming a performance win.
 * `cargo fmt`, `cargo clippy -- -D warnings` and `cargo test` should all be clean
   before you open the PR.
 
+## Releasing
+
+The version is written in three places, and a stale one ships silently:
+`Cargo.toml`, `Cargo.lock` (refreshed by any `cargo build`), and the `VERSION=`
+literal in the README install block. Bump all three in the
+`chore: release vX.Y.Z` commit, then push the matching `vX.Y.Z` tag —
+`release.yml` builds the archives and checksums from the tag, so the README
+literal is the one nothing else corrects.
+
 ## Licence
 
 By contributing you agree that your contributions are licensed under the MIT

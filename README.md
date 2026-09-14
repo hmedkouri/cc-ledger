@@ -2,6 +2,14 @@
 
 A Claude Code status line backed by a persistent, per-request token ledger.
 
+[![CI](https://github.com/hmedkouri/cc-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/hmedkouri/cc-ledger/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hmedkouri/cc-ledger)](https://github.com/hmedkouri/cc-ledger/releases)
+[![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
+[Install](#install) · [Status line](#the-status-line) · [Usage](#usage) ·
+[API cost](#api-cost) · [Accuracy](#accuracy) · [Docs](#documentation)
+
 ![The cc-ledger status line: directory and branch, context bar, rate-limit windows with reset countdowns, model, and today's token total](docs/statusline.png)
 
 Claude Code deletes its own transcripts on a schedule (`cleanupPeriodDays`, 30
@@ -16,43 +24,101 @@ Two binaries:
 * **`cc-usage`** — queries the ledger: totals, per-day/week/month breakdowns,
   grouped by model or project.
 
+| Command | What it reports |
+| --- | --- |
+| `cc-usage summary` | Totals over a date range, plus a coverage line |
+| `cc-usage daily` / `weekly` / `monthly` | The same totals bucketed, optionally `--by model` or `--by project` |
+| `cc-usage sessions` | Per-session totals, filterable by project |
+| `cc-usage export` | CSV or JSON for anything this tool doesn't chart |
+| `cc-usage backfill` | Ingests transcripts already on disk |
+| `cc-usage prune` | Deletes old rows and compacts the file |
+
+Nothing here is network-facing, and no data leaves the machine.
+
 ## Install
 
-### Prebuilt
+### 1. Get the binaries
+
+**Prebuilt.** Pick your target:
+
+| Platform | `TARGET` |
+| --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-musl` |
+| macOS Apple silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
+
+Download the archive and its checksum:
 
 ```sh
-# x86_64-unknown-linux-musl · aarch64-unknown-linux-musl · aarch64-apple-darwin · x86_64-apple-darwin
 TARGET=x86_64-unknown-linux-musl
 VERSION=v0.1.1
 BASE=https://github.com/hmedkouri/cc-ledger/releases/download/$VERSION
 curl -fL -O $BASE/cc-ledger-$VERSION-$TARGET.tar.gz -O $BASE/cc-ledger-$VERSION-$TARGET.sha256
-sha256sum -c cc-ledger-$VERSION-$TARGET.sha256 && tar xzf cc-ledger-$VERSION-$TARGET.tar.gz  # shasum -a 256 -c on macOS
-mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
-# macOS: xattr -d com.apple.quarantine ~/.claude/bin/statusline ~/.claude/bin/cc-usage
 ```
 
-Point Claude Code at it by adding
-`"statusLine": {"type": "command", "command": "/home/you/.claude/bin/statusline"}`
-to `~/.claude/settings.json` — the path must be absolute — or clone and run
-`make statusline-apply`.
+Check it before you run it:
 
-### From source
+```sh
+sha256sum -c cc-ledger-$VERSION-$TARGET.sha256   # a failure means a bad download — stop here
+```
 
-Rust 1.87+; SQLite is bundled.
+Then unpack it:
+
+```sh
+tar xzf cc-ledger-$VERSION-$TARGET.tar.gz
+mkdir -p ~/.claude/bin && mv statusline cc-usage ~/.claude/bin/
+```
+
+> **macOS** — verify with `shasum -a 256 -c` rather than `sha256sum -c`, and
+> clear the quarantine flag afterwards or Gatekeeper refuses to run the
+> binaries:
+>
+> ```sh
+> xattr -d com.apple.quarantine ~/.claude/bin/statusline ~/.claude/bin/cc-usage
+> ```
+
+**From source.** Rust 1.87+; SQLite is bundled.
 
 ```sh
 git clone https://github.com/hmedkouri/cc-ledger.git && cd cc-ledger
-make install          # both binaries → ~/.claude/bin; prints the settings diff without applying it
-make statusline-apply # the only step that edits settings.json; keeps a timestamped backup
+make install
 ```
 
-Run `~/.claude/bin/cc-usage backfill` once to ingest existing transcripts.
-`make uninstall` reverses everything and leaves the database; `make help` covers
-the rest. For the query tool alone:
-`cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage`.
+> Builds both binaries into `~/.claude/bin` and prints the `settings.json` diff
+> without applying it. `make uninstall` reverses everything and leaves the
+> database; `make help` covers the rest. For the query tool alone:
+> `cargo install --git https://github.com/hmedkouri/cc-ledger --tag v0.1.1 --bin cc-usage`.
 
-**Putting `cc-usage` on your PATH.** Optional; `statusline` never needs it.
-Append to `~/.zshrc` or `~/.bashrc`:
+### 2. Point Claude Code at it
+
+```sh
+~/.claude/bin/cc-usage install
+```
+
+Paste the printed `statusLine` key into `~/.claude/settings.json` — create the
+file, wrapped in `{ }`, if it isn't there — then restart Claude Code. From a
+clone, `make statusline-apply` writes it for you and keeps a timestamped backup.
+
+> It prints rather than writes because a malformed `settings.json` stops Claude
+> Code from starting at all.
+
+### 3. Check it worked
+
+```sh
+~/.claude/bin/cc-usage --version
+~/.claude/bin/cc-usage backfill   # once, to ingest the transcripts still on disk
+~/.claude/bin/cc-usage summary    # should now print a non-zero total
+```
+
+The status line appears under the next prompt. Until that first `backfill`,
+renders stay busy catching up on the current session.
+
+<details>
+<summary>Optional: putting <code>cc-usage</code> on your PATH</summary>
+
+`statusline` never needs it — Claude Code runs it by absolute path. To type
+`cc-usage` without the prefix, append to `~/.zshrc` or `~/.bashrc`:
 
 ```sh
 export PATH="$HOME/.claude/bin:$PATH"
@@ -60,6 +126,8 @@ export PATH="$HOME/.claude/bin:$PATH"
 
 `make install` also symlinks `cc-usage` into `~/.local/bin`, and warns when that
 is not on your `PATH`. Either way, only new shells see it.
+
+</details>
 
 ## The status line
 
@@ -84,6 +152,7 @@ renders today as API-equivalent dollars instead of tokens.
 Rendering never blocks on ingest. The line is printed and flushed first; the
 transcript read then runs under a 150 ms wall-clock budget and is abandoned if
 it overruns, because the next invocation resumes from a stored byte cursor.
+[`docs/internals.md`](docs/internals.md) has the timing budgets in full.
 
 ## Usage
 
@@ -127,6 +196,14 @@ That is what the usage *would have cost* on the API. A subscription's cost is
 its fee; this number is the one that says whether the subscription is earning
 its keep, and which models and projects consume the value.
 
+Rates live in `src/pricing.rs`, verified against the published pricing page on
+2026-09-13. An unknown model id is reported as *unpriced* rather than counted as
+free, so a model introduced by a future Claude Code release cannot silently
+shrink the total.
+
+<details>
+<summary>Why four token classes, and what the estimate assumes</summary>
+
 Four token classes are priced separately — input, output, cache write and cache
 read — and cache writes differ again by TTL. In the 11-day development sample,
 cache reads were 52% of the bill, cache writes 34%, output 14%, uncached input
@@ -138,11 +215,6 @@ and output can miss most of the bill — 86% of it in this sample.
 Long context does not change the rate — Claude 4.6 and later bill the full 1M
 context window at standard pricing — so the model id recorded on each request is
 enough to price it.
-
-Rates live in `src/pricing.rs`, verified against the published pricing page on
-2026-09-13. An unknown model id is reported as *unpriced* rather than counted as
-free, so a model introduced by a future Claude Code release cannot silently
-shrink the total.
 
 **What the estimate assumes.** Standard speed — fast mode doubles Opus rates;
 globally routed inference — pinning to `us` adds 10% to every token class; and
@@ -162,6 +234,8 @@ Separately, the status line records `rate_limits.five_hour` and `seven_day` from
 Claude Code's payload into a `limits` table. On a subscription that is the live
 budget signal, and the ledger is the only place that history exists — the server
 keeps none, and the percentages vanish once a window rolls over.
+
+</details>
 
 ## Accuracy
 
@@ -191,55 +265,6 @@ the `format_change` issue template exists for reporting that.
 Good for trends, budgeting, and comparing days and projects; not for disputing a
 bill or auditing against an invoice.
 
-## Performance
-
-A cold render is budgeted under 20 ms in release on Linux, asserted in
-`tests/timing.rs`. That test measures a whole process invocation, and on macOS
-the spawn dominates it and varies far too widely to bound — three CI samples of
-one build gave 70 ms, 77 ms and 156 ms — so the assertion is skipped there rather
-than loosened into meaninglessness. The work this crate actually does is guarded
-in-process instead, and the macOS runner completes those checks faster than the
-Linux one.
-The status line itself spawns no subprocess of any kind: the branch comes from
-reading `.git/HEAD`
-directly, and there is no network-facing dependency in the crate. For scale, the
-reference implementation this borrows its styling from spawns `git` twice on
-every single render — once to test whether the directory is a repository, then
-again to read the branch.
-
-Ingest runs only after the line has been printed and flushed. It is capped at a
-150 ms wall-clock budget and commits in batches of 500 lines, each batch writing
-its records and its cursor in one transaction, so a backlog is worked off
-incrementally across renders rather than stalling on one oversized pass.
-
-The one visible cost is that renders stay busy until an un-backfilled session
-has been caught up. Running `cc-usage backfill` once after install avoids it
-entirely.
-
-## Where things live
-
-| What | Where |
-| --- | --- |
-| Ledger database | `$XDG_DATA_HOME/cc-ledger/ledger.db`, else `~/.local/share/cc-ledger/ledger.db` |
-| Override | `CC_LEDGER_DB` |
-| Transcripts read | `~/.claude/projects/**/*.jsonl` |
-
-The database runs in WAL mode with a 250 ms busy timeout, because several
-Claude Code sessions write to it concurrently. Every write upserts on a stable
-key, merging each token field with `max()`, so a repeated, concurrent or
-abandoned pass cannot double-count — and a partially written first record is
-corrected rather than kept, because usage only ever grows within a response.
-
-A request costs about 356 bytes once every index is counted. At the development
-machine's rate of roughly 250 requests a day that is around 92 000 rows and
-31 MB a year, which is small enough to forget about. Transcript paths are the
-reason it is not considerably larger: they repeat on every row and averaged 108
-bytes, so they live in a `transcripts` table and each request stores an integer
-instead. The saving scales with rows per transcript — at ~150 rows per transcript
-the development database shrank 27%; many short sessions save less. If you
-do want the space back, `cc-usage prune --before 2026-01-01` prints what it
-would remove and deletes nothing until you add `--yes`, then compacts the file.
-
 ## The one thing worth knowing about the data
 
 A single API response is written to the transcript as **one JSONL line per
@@ -252,8 +277,16 @@ how you work. On the development machine that factor was two: 4 942 lines for
 `message.id`, which is non-null on every usage record and unique across every
 transcript on disk.
 
-`docs/formats.md` documents every field, with provenance and sample redacted
-records. Read it before changing a parser.
+## Documentation
+
+* [`docs/formats.md`](docs/formats.md) — every Claude Code field this tool
+  reads, with provenance and redacted sample records. Read it before changing a
+  parser.
+* [`docs/internals.md`](docs/internals.md) — render and ingest timing budgets,
+  database location, concurrency and on-disk size.
+* [`CONTRIBUTING.md`](CONTRIBUTING.md) — design constraints and the rules for
+  fixtures.
+* [`SECURITY.md`](SECURITY.md) — private reporting.
 
 ## Development
 
